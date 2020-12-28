@@ -1,0 +1,20 @@
+From: Vincent Bernat <vincent@bernat.im>
+Date: Sun, 3 Jan 2016 18:11:46 +0100
+Subject: skip tests requiring network access
+
+---
+ tests/test_auth_keys.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/tests/test_auth_keys.py b/tests/test_auth_keys.py
+index d9c3d70..3d6401f 100644
+--- a/tests/test_auth_keys.py
++++ b/tests/test_auth_keys.py
+@@ -94,6 +94,7 @@ class _TestAuthorizedKeys(TempDirTestCase):
+ 
+                     self.assertEqual(result is not None, match)
+ 
++    @unittest.skip("network access is required for those tests")
+     def test_matches(self):
+         """Test authorized keys matching"""
+ 
