@@ -1,2 +1,3 @@
 sphinx-use-default-theme.patch
 0002-skip-tests-requiring-network-access.patch
+0003_fix_chacha_support.patch

@@ -1,6 +1,7 @@
 python-asyncssh (2.5.0-0.1pexip1) pexip; urgency=medium
 
   * Prepare Pexip packaging
+  * Fix Poly1305 support so that it checks cryptography library properly.
 
  -- Mark Hymers <mark.hymers@pexip.com>  Wed, 28 Sep 2022 15:26:25 +0100
 
