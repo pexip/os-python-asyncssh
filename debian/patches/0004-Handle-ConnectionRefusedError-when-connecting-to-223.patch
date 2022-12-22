@@ -1,0 +1,58 @@
+From: Stefano Rivera <stefanor@debian.org>
+Date: Wed, 18 May 2022 09:21:27 -0400
+Subject: Handle ConnectionRefusedError when connecting to 223.255.255.254
+
+If the tests are run from an environment with a firewall, they may be
+refused instead of timing out.
+
+Just skip the test.
+
+Forwarded: https://github.com/ronf/asyncssh/pull/480
+---
+ tests/test_connection.py | 23 ++++++++++++++++-------
+ 1 file changed, 16 insertions(+), 7 deletions(-)
+
+diff --git a/tests/test_connection.py b/tests/test_connection.py
+index 9a3871c..9eec850 100644
+--- a/tests/test_connection.py
++++ b/tests/test_connection.py
+@@ -425,23 +425,32 @@ class _TestConnection(ServerTestCase):
+     async def test_connect_timeout_exceeded(self):
+         """Test connect timeout exceeded"""
+ 
+-        with self.assertRaises(asyncio.TimeoutError):
+-            await asyncssh.connect('223.255.255.254', connect_timeout=1)
++        try:
++            with self.assertRaises(asyncio.TimeoutError):
++                await asyncssh.connect('223.255.255.254', connect_timeout=1)
++        except ConnectionRefusedError:
++            raise unittest.SkipTest("Outboand connection firewalled")
+ 
+     @asynctest
+     async def test_connect_timeout_exceeded_string(self):
+         """Test connect timeout exceeded with string value"""
+ 
+-        with self.assertRaises(asyncio.TimeoutError):
+-            await asyncssh.connect('223.255.255.254', connect_timeout='0m1s')
++        try:
++            with self.assertRaises(asyncio.TimeoutError):
++                await asyncssh.connect('223.255.255.254', connect_timeout='0m1s')
++        except ConnectionRefusedError:
++            raise unittest.SkipTest("Outboand connection firewalled")
+ 
+     @asynctest
+     async def test_connect_timeout_exceeded_tunnel(self):
+         """Test connect timeout exceeded"""
+ 
+-        with self.assertRaises(asyncio.TimeoutError):
+-            await asyncssh.listen(server_host_keys=['skey'],
+-                                  tunnel='223.255.255.254', connect_timeout=1)
++        try:
++            with self.assertRaises(asyncio.TimeoutError):
++                await asyncssh.listen(server_host_keys=['skey'],
++                                      tunnel='223.255.255.254', connect_timeout=1)
++        except ConnectionRefusedError:
++            raise unittest.SkipTest("Outboand connection firewalled")
+ 
+     @asynctest
+     async def test_invalid_connect_timeout(self):

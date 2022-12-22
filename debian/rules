@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 export PYBUILD_NAME = asyncssh
+export HOME=/tmp
 
 %:
 	dh $@ --with python3,sphinxdoc --buildsystem pybuild

@@ -4,7 +4,7 @@ Upstream-Contact: Ron Frederick <ronf@timeheart.net>
 Source: https://github.com/ronf/asyncssh
 
 Files: *
-Copyright: Copyright (c) 2013-2015 by Ron Frederick <ronf@timeheart.net>.
+Copyright: Copyright (c) 2013-2022 by Ron Frederick <ronf@timeheart.net> and others.
 License: EPL-1.0
 
 Files: debian/*

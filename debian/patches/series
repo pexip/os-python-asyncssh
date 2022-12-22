@@ -1,2 +1,5 @@
 sphinx-use-default-theme.patch
 0002-skip-tests-requiring-network-access.patch
+0003-Revert-fido-0.9.2-support.patch
+0004-Handle-ConnectionRefusedError-when-connecting-to-223.patch
+mock-pathlib-expanduser.patch

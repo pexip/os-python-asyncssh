@@ -1,4 +1,4 @@
-# Copyright (c) 2015-2019 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2015-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -26,12 +26,12 @@ import unittest
 import asyncssh
 
 from asyncssh.auth import MSG_USERAUTH_PK_OK, lookup_client_auth
-from asyncssh.auth import get_server_auth_methods, lookup_server_auth
+from asyncssh.auth import get_supported_server_auth_methods, lookup_server_auth
 from asyncssh.auth import MSG_USERAUTH_GSSAPI_RESPONSE
 from asyncssh.constants import MSG_USERAUTH_REQUEST, MSG_USERAUTH_FAILURE
 from asyncssh.constants import MSG_USERAUTH_SUCCESS
 from asyncssh.gss import GSSClient, GSSServer
-from asyncssh.packet import SSHPacket, Boolean, NameList, String
+from asyncssh.packet import SSHPacket, Boolean, Byte, NameList, String
 
 from .util import asynctest, gss_available, patch_gss
 from .util import AsyncTestCase, ConnectionStub
@@ -55,13 +55,21 @@ class _AuthConnectionStub(ConnectionStub):
 
         # pylint: disable=no-self-use
 
-        return b''.join((String('user'), String('service'),
-                         String(method)) + args)
+        return b''.join((Byte(MSG_USERAUTH_REQUEST), String('user'),
+                         String('service'), String(method)) + args)
 
     def get_userauth_request_data(self, method, *args):
         """Get signature data for a user authentication request"""
 
         return String('') + self._get_userauth_request_packet(method, args)
+
+    def send_userauth_packet(self, pkttype, *args, handler=None,
+                             trivial=True):
+        """Send a user authentication packet"""
+
+        # pylint: disable=unused-argument
+
+        self.send_packet(pkttype, *args, handler=handler)
 
 
 class _AuthClientStub(_AuthConnectionStub):
@@ -161,7 +169,8 @@ class _AuthClientStub(_AuthConnectionStub):
         self._auth = None
         self._auth_waiter = None
 
-    async def send_userauth_request(self, method, *args, key=None):
+    async def send_userauth_request(self, method, *args, key=None,
+                                    trivial=True):
         """Send a user authentication request"""
 
         packet = self._get_userauth_request_packet(method, args)
@@ -169,7 +178,8 @@ class _AuthClientStub(_AuthConnectionStub):
         if key:
             packet += String(key.sign(String('') + packet))
 
-        self.send_packet(MSG_USERAUTH_REQUEST, packet)
+        self.send_userauth_packet(MSG_USERAUTH_REQUEST, packet[1:],
+                                  trivial=trivial)
 
     def get_gss_context(self):
         """Return the GSS context associated with this connection"""
@@ -290,10 +300,11 @@ class _AuthServerStub(_AuthConnectionStub):
                 self._auth.cancel()
 
             if self._override_gss_mech:
-                self.send_packet(MSG_USERAUTH_GSSAPI_RESPONSE,
-                                 String('mismatch'))
+                self.send_userauth_packet(MSG_USERAUTH_GSSAPI_RESPONSE,
+                                          String('mismatch'))
             elif self._override_pk_ok:
-                self.send_packet(MSG_USERAUTH_PK_OK, String(''), String(''))
+                self.send_userauth_packet(MSG_USERAUTH_PK_OK, String(''),
+                                          String(''))
             else:
                 self._auth = lookup_server_auth(self, 'user', method, packet)
         else:
@@ -303,14 +314,14 @@ class _AuthServerStub(_AuthConnectionStub):
         """Send a user authentication failure response"""
 
         self._auth = None
-        self.send_packet(MSG_USERAUTH_FAILURE, NameList([]),
-                         Boolean(partial_success))
+        self.send_userauth_packet(MSG_USERAUTH_FAILURE, NameList([]),
+                                  Boolean(partial_success))
 
     def send_userauth_success(self):
         """Send a user authentication success response"""
 
         self._auth = None
-        self.send_packet(MSG_USERAUTH_SUCCESS)
+        self.send_userauth_packet(MSG_USERAUTH_SUCCESS)
 
     def get_gss_context(self):
         """Return the GSS context associated with this connection"""
@@ -422,24 +433,27 @@ class _TestAuth(AsyncTestCase):
 
         with self.subTest('No auth methods'):
             server_conn = _AuthServerStub()
-            self.assertEqual(get_server_auth_methods(server_conn), [])
+            self.assertEqual(
+                get_supported_server_auth_methods(server_conn), [])
             server_conn.close()
 
         with self.subTest('All auth methods'):
             gss_host = '1' if gss_available else None
-            server_conn = _AuthServerStub(gss_host=gss_host,
-                                          host_based_auth=True,
-                                          public_key_auth=True,
-                                          password_auth=True, kbdint_auth=True)
+            server_conn = _AuthServerStub(
+                gss_host=gss_host, host_based_auth=True, public_key_auth=True,
+                password_auth=True, kbdint_auth=True)
+
             if gss_available: # pragma: no branch
-                self.assertEqual(get_server_auth_methods(server_conn),
-                                 [b'gssapi-keyex', b'gssapi-with-mic',
-                                  b'hostbased', b'publickey',
-                                  b'keyboard-interactive', b'password'])
+                self.assertEqual(
+                    get_supported_server_auth_methods(server_conn),
+                    [b'gssapi-keyex', b'gssapi-with-mic', b'hostbased',
+                     b'publickey', b'keyboard-interactive', b'password'])
             else: # pragma: no cover
-                self.assertEqual(get_server_auth_methods(server_conn),
-                                 [b'hostbased', b'publickey',
-                                  b'keyboard-interactive', b'password'])
+                self.assertEqual(
+                    get_supported_server_auth_methods(server_conn),
+                    [b'hostbased', b'publickey',
+                     b'keyboard-interactive', b'password'])
+
             server_conn.close()
 
         with self.subTest('Unknown auth method'):

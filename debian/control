@@ -1,7 +1,7 @@
 Source: python-asyncssh
 Section: python
 Priority: optional
-Maintainer: Debian Python Modules Team <python-modules-team@lists.alioth.debian.org>
+Maintainer: Debian Python Team <team+python@tracker.debian.org>
 Uploaders: Vincent Bernat <bernat@debian.org>
 Build-Depends:
  debhelper-compat (= 12),
@@ -15,6 +15,7 @@ Build-Depends:
  python3-gssapi <!nocheck>,
  python3-libnacl <!nocheck>,
  python3-openssl <!nocheck>,
+ python3-typing-extensions <!nocheck>,
 # not packaged
 # python3-pkcs11 <!nocheck>,
  openssl,
@@ -22,8 +23,8 @@ Build-Depends:
  dh-python
 Standards-Version: 4.5.1
 Homepage: https://github.com/ronf/asyncssh
-Vcs-Browser: https://salsa.debian.org/python-team/modules/python-asyncssh
-Vcs-Git: https://salsa.debian.org/python-team/modules/python-asyncssh.git
+Vcs-Browser: https://salsa.debian.org/python-team/packages/python-asyncssh
+Vcs-Git: https://salsa.debian.org/python-team/packages/python-asyncssh.git
 Testsuite: autopkgtest-pkg-python
 
 Package: python3-asyncssh
