@@ -1,4 +1,4 @@
-# Copyright (c) 2016-2020 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2016-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -30,11 +30,11 @@ import unittest
 from unittest.mock import patch
 
 import asyncssh
-from asyncssh.misc import maybe_wait_closed
+from asyncssh.misc import maybe_wait_closed, write_file
 from asyncssh.packet import String, UInt32
 from asyncssh.public_key import CERT_TYPE_USER
 from asyncssh.socks import SOCKS5, SOCKS5_AUTH_NONE
-from asyncssh.socks import SOCKS4_OK_RESPONSE, SOCKS5_OK_RESPONSE
+from asyncssh.socks import SOCKS4_OK_RESPONSE, SOCKS5_OK_RESPONSE_HDR
 
 from .server import Server, ServerTestCase
 from .util import asynctest, echo, make_certificate
@@ -205,6 +205,18 @@ class _UNIXConnectionServer(Server):
             return listen_path != 'fail'
 
 
+class _UNIXAsyncConnectionServer(_UNIXConnectionServer):
+    """Server for testing async direct and forwarded UNIX connections"""
+
+    async def unix_server_requested(self, listen_path):
+        """Handle a request to create a new UNIX domain listener"""
+
+        if listen_path == 'open':
+            return _EchoPathListener(self._conn)
+        else:
+            return listen_path != 'fail'
+
+
 class _CheckForwarding(ServerTestCase):
     """Utility functions for AsyncSSH forwarding unit tests"""
 
@@ -269,7 +281,8 @@ class _TestTCPForwarding(_CheckForwarding):
     async def _check_local_connection(self, listen_port, delay=None):
         """Open a local connection and test if an input line is echoed back"""
 
-        reader, writer = await asyncio.open_connection(None, listen_port)
+        reader, writer = await asyncio.open_connection('127.0.0.1',
+                                                       listen_port)
 
         await self._check_echo_line(reader, writer, delay=delay)
 
@@ -306,9 +319,64 @@ class _TestTCPForwarding(_CheckForwarding):
         """Test failed connection on a tunneled SSH connection via string"""
 
         with self.assertRaises(asyncssh.ChannelOpenError):
-            await asyncssh.connect('0.0.0.1',
+            await asyncssh.connect('\xff',
                                    tunnel='%s:%d' % (self._server_addr,
                                                      self._server_port))
+
+    @asynctest
+    async def test_proxy_jump(self):
+        """Test connecting a tunnneled SSH connection using ProxyJump"""
+
+        write_file('.ssh/config', 'Host target\n'
+                   '  Hostname localhost\n'
+                   f'  Port {self._server_port}\n'
+                   f'  ProxyJump localhost:{self._server_port}\n'
+                   'IdentityFile ckey\n', 'w')
+
+        try:
+            async with self.connect(host='target', username='ckey'):
+                pass
+        finally:
+            os.remove('.ssh/config')
+
+    @asynctest
+    async def test_proxy_jump_encrypted_key(self):
+        """Test ProxyJump with encrypted client key"""
+
+        write_file('.ssh/config', 'Host *\n'
+                   '  User ckey\n'
+                   'Host target\n'
+                   '  Hostname localhost\n'
+                   f'  Port {self._server_port}\n'
+                   f'  ProxyJump localhost:{self._server_port}\n'
+                   '  IdentityFile ckey_encrypted\n', 'w')
+
+        try:
+            async with self.connect(host='target', username='ckey',
+                                    client_keys='ckey_encrypted',
+                                    passphrase='passphrase'):
+                pass
+        finally:
+            os.remove('.ssh/config')
+
+    @asynctest
+    async def test_proxy_jump_encrypted_key_missing_passphrase(self):
+        """Test ProxyJump with encrypted client key and missing passphrase"""
+
+        write_file('.ssh/config', 'Host *\n'
+                   '  User ckey\n'
+                   'Host target\n'
+                   '  Hostname localhost\n'
+                   f'  Port {self._server_port}\n'
+                   f'  ProxyJump localhost:{self._server_port}\n'
+                   '  IdentityFile ckey_encrypted\n', 'w')
+
+        try:
+            with self.assertRaises(asyncssh.KeyImportError):
+                await self.connect(host='target', username='ckey',
+                                   client_keys='ckey_encrypted')
+        finally:
+            os.remove('.ssh/config')
 
     @asynctest
     async def test_ssh_connect_reverse_tunnel(self):
@@ -358,7 +426,7 @@ class _TestTCPForwarding(_CheckForwarding):
         """Test open failure on a tunneled SSH listener via string"""
 
         with self.assertRaises(asyncssh.ChannelListenError):
-            await asyncssh.listen('0.0.0.1',
+            await asyncssh.listen('\xff',
                                   tunnel='%s:%d' % (self._server_addr,
                                                     self._server_port),
                                   server_factory=Server,
@@ -524,7 +592,7 @@ class _TestTCPForwarding(_CheckForwarding):
             async with conn.forward_local_port('', 0, '', 8) as listener:
                 listen_port = listener.get_port()
 
-                reader, writer = await asyncio.open_connection(None,
+                reader, writer = await asyncio.open_connection('127.0.0.1',
                                                                listen_port)
 
                 writer.write(4*1024*1024*b'\0')
@@ -534,7 +602,6 @@ class _TestTCPForwarding(_CheckForwarding):
                 writer.close()
                 await maybe_wait_closed(writer)
 
-
     @asynctest
     async def test_forward_local_port_failure(self):
         """Test failure in forwarding a local port"""
@@ -543,7 +610,7 @@ class _TestTCPForwarding(_CheckForwarding):
             async with conn.forward_local_port('', 0, '', 65535) as listener:
                 listen_port = listener.get_port()
 
-                reader, writer = await asyncio.open_connection(None,
+                reader, writer = await asyncio.open_connection('127.0.0.1',
                                                                listen_port)
 
                 self.assertEqual((await reader.read()), b'')
@@ -560,7 +627,7 @@ class _TestTCPForwarding(_CheckForwarding):
         async with self.connect() as conn:
             async with conn.forward_local_port('0.0.0.0', 0, '', 7) as listener:
                 with self.assertRaises(OSError):
-                    await conn.forward_local_port(None, listener.get_port(),
+                    await conn.forward_local_port('', listener.get_port(),
                                                   '', 7)
 
     @unittest.skipIf(sys.platform == 'win32',
@@ -572,7 +639,7 @@ class _TestTCPForwarding(_CheckForwarding):
         async with self.connect() as conn:
             async with conn.forward_local_port('::', 0, '', 7) as listener:
                 with self.assertRaises(OSError):
-                    await conn.forward_local_port(None, listener.get_port(),
+                    await conn.forward_local_port('', listener.get_port(),
                                                   '', 7)
 
     @asynctest
@@ -583,9 +650,8 @@ class _TestTCPForwarding(_CheckForwarding):
             async with conn.forward_local_port('', 0, '', 1) as listener:
                 listen_port = listener.get_port()
 
-                reader, writer = await asyncio.open_connection(None,
+                reader, writer = await asyncio.open_connection('127.0.0.1',
                                                                listen_port)
-
                 self.assertEqual((await reader.read()), b'')
 
                 writer.close()
@@ -599,7 +665,8 @@ class _TestTCPForwarding(_CheckForwarding):
             async with conn.forward_local_port('', 0, '', 7) as listener:
                 listen_port = listener.get_port()
 
-                _, writer = await asyncio.open_connection(None, listen_port)
+                _, writer = await asyncio.open_connection('127.0.0.1',
+                                                          listen_port)
 
                 writer.close()
                 await maybe_wait_closed(writer)
@@ -614,8 +681,8 @@ class _TestTCPForwarding(_CheckForwarding):
         server_port = server.sockets[0].getsockname()[1]
 
         async with self.connect() as conn:
-            async with conn.forward_remote_port('', 0,
-                                                '', server_port) as listener:
+            async with conn.forward_remote_port(
+                    '', 0, '127.0.0.1', server_port) as listener:
                 await self._check_local_connection(listener.get_port())
 
         server.close()
@@ -635,8 +702,8 @@ class _TestTCPForwarding(_CheckForwarding):
         sock.close()
 
         async with self.connect() as conn:
-            async with conn.forward_remote_port('', remote_port,
-                                                '', server_port) as listener:
+            async with conn.forward_remote_port(
+                    '', remote_port, '127.0.0.1', server_port) as listener:
                 await self._check_local_connection(listener.get_port())
 
         server.close()
@@ -946,6 +1013,18 @@ class _TestUNIXForwarding(_CheckForwarding):
                 self.assertEqual(pkttype, asyncssh.MSG_REQUEST_FAILURE)
 
 
+class _TestAsyncUNIXForwarding(_TestUNIXForwarding):
+    """Unit tests for AsyncSSH UNIX connection forwarding with async return"""
+
+    @classmethod
+    async def start_server(cls):
+        """Start an SSH server which supports UNIX connection forwarding"""
+
+        return await cls.create_server(
+            _UNIXAsyncConnectionServer,
+            authorized_client_keys='authorized_keys')
+
+
 class _TestSOCKSForwarding(_CheckForwarding):
     """Unit tests for AsyncSSH SOCKS dynamic port forwarding"""
 
@@ -987,7 +1066,8 @@ class _TestSOCKSForwarding(_CheckForwarding):
         else:
             self.assertEqual((await reader.read()), b'')
 
-    async def _check_socks5_connect(self, reader, writer, data, result):
+    async def _check_socks5_connect(self, reader, writer, data,
+                                    addrtype, addrlen, result):
         """Check SOCKSv5 connect_requests"""
 
         writer.write(bytes((SOCKS5, 1, SOCKS5_AUTH_NONE)))
@@ -998,21 +1078,26 @@ class _TestSOCKSForwarding(_CheckForwarding):
         await asyncio.sleep(0.1)
         writer.write(data[20:])
 
-        response = await reader.readexactly(len(SOCKS5_OK_RESPONSE))
-        self.assertEqual(response, SOCKS5_OK_RESPONSE)
+        expected = SOCKS5_OK_RESPONSE_HDR + bytes((addrtype,)) + \
+                   (addrlen + 2) * b'\0'
+
+        response = await reader.readexactly(len(expected))
+        self.assertEqual(response, expected)
 
         if result:
             await self._check_echo_line(reader, writer)
         else:
             self.assertEqual((await reader.read()), b'')
 
-    async def _check_socks(self, handler, listen_port, msg, data, *args):
+    async def _check_socks(self, handler, listen_port, msg,
+                           data, *args):
         """Unit test SOCKS dynamic port forwarding"""
 
         with self.subTest(msg=msg, data=data):
             data = codecs.decode(data, 'hex')
 
-            reader, writer = await asyncio.open_connection(None, listen_port)
+            reader, writer = await asyncio.open_connection('127.0.0.1',
+                                                           listen_port)
 
             try:
                 await handler(reader, writer, data, *args)
@@ -1023,8 +1108,6 @@ class _TestSOCKSForwarding(_CheckForwarding):
     @asynctest
     async def test_forward_socks(self):
         """Test dynamic port forwarding via SOCKS"""
-
-        # pylint: disable=bad-whitespace
 
         _socks_early_errors = [
             ('Bad version',               '0000'),
@@ -1047,13 +1130,11 @@ class _TestSOCKSForwarding(_CheckForwarding):
         ]
 
         _socks5_connects = [
-            ('IPv4',        '050100017f0000010007',             True),
-            ('Hostname',    '05010003096c6f63616c686f73740007', True),
-            ('IPv6',        '05010004' + 15*'00' + '010007',    True),
-            ('Rejected',    '05010003000001',                   False)
+            ('IPv4',     '050100017f0000010007',             1,  4, True),
+            ('Hostname', '05010003096c6f63616c686f73740007', 1,  4, True),
+            ('IPv6',     '05010004' + 15*'00' + '010007',    4, 16, True),
+            ('Rejected', '05010003000001',                   1,  4, False)
         ]
-
-        # pylint: enable=bad-whitespace
 
         async with self.connect() as conn:
             async with  conn.forward_socks('', 0) as listener:
@@ -1071,9 +1152,10 @@ class _TestSOCKSForwarding(_CheckForwarding):
                     await self._check_socks(self._check_socks4_connect,
                                             listen_port, msg, data, result)
 
-                for msg, data, result in _socks5_connects:
+                for msg, data, addrtype, addrlen, result in _socks5_connects:
                     await self._check_socks(self._check_socks5_connect,
-                                            listen_port, msg, data, result)
+                                            listen_port, msg, data,
+                                            addrtype, addrlen, result)
 
     @asynctest
     async def test_forward_socks_specific_port(self):
@@ -1085,7 +1167,7 @@ class _TestSOCKSForwarding(_CheckForwarding):
         sock.close()
 
         async with self.connect() as conn:
-            async with conn.forward_socks(None, listen_port):
+            async with conn.forward_socks('', listen_port):
                 pass
 
     @unittest.skipIf(sys.platform == 'win32',
@@ -1095,6 +1177,6 @@ class _TestSOCKSForwarding(_CheckForwarding):
         """Test error binding a local dynamic forwarding port"""
 
         async with self.connect() as conn:
-            async with conn.forward_socks(None, 0) as listener:
+            async with conn.forward_socks('', 0) as listener:
                 with self.assertRaises(OSError):
-                    await conn.forward_socks(None, listener.get_port())
+                    await conn.forward_socks('', listener.get_port())

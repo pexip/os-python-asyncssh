@@ -1,4 +1,4 @@
-# Copyright (c) 2016-2020 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2016-2021 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -24,10 +24,38 @@ import asyncio
 import errno
 import os
 import sys
+from types import TracebackType
+from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple, Type, Union
+from typing_extensions import Protocol
 
+from .listener import SSHForwardListener
 from .misc import async_context_manager, maybe_wait_closed
 from .packet import Byte, String, UInt32, PacketDecodeError, SSHPacket
-from .public_key import SSHKeyPair, load_default_keypairs, load_keypairs
+from .public_key import KeyPairListArg, SSHCertificate, SSHKeyPair
+from .public_key import load_default_keypairs, load_keypairs
+
+if TYPE_CHECKING:
+    from tempfile import TemporaryDirectory
+
+
+class AgentReader(Protocol):
+    """Protocol for reading from an SSH agent"""
+
+    async def readexactly(self, n: int) -> bytes:
+        """Read exactly n bytes from the SSH agent"""
+
+
+class AgentWriter(Protocol):
+    """Protocol for writing to an SSH agent"""
+
+    def write(self, data: bytes) -> None:
+        """Write bytes to the SSH agent"""
+
+    def close(self) -> None:
+        """Close connection to the SSH agent"""
+
+    async def wait_closed(self) -> None:
+        """Wait for the connection to the SSH agent to close"""
 
 
 try:
@@ -35,14 +63,23 @@ try:
         from .agent_win32 import open_agent
     else:
         from .agent_unix import open_agent
-except ImportError as exc: # pragma: no cover
-    async def open_agent(_agent_path, reason=str(exc)):
+except ImportError as _exc: # pragma: no cover
+    async def open_agent(agent_path: Optional[str]) -> \
+            Tuple[AgentReader, AgentWriter]:
         """Dummy function if we're unable to import agent support"""
 
-        raise OSError(errno.ENOENT, 'Agent support unavailable: %s' % reason)
+        raise OSError(errno.ENOENT, 'Agent support unavailable: %s' % str(_exc))
 
 
-# pylint: disable=bad-whitespace
+class _SupportsOpenAgentConnection(Protocol):
+    """A class that supports open_agent_connection"""
+
+    async def open_agent_connection(self) -> Tuple[AgentReader, AgentWriter]:
+        """Open a forwarded ssh-agent connection back to the client"""
+
+
+_AgentPath = Union[None, str, _SupportsOpenAgentConnection]
+
 
 # Client request message numbers
 SSH_AGENTC_REQUEST_IDENTITIES            = 11
@@ -74,79 +111,67 @@ SSH_AGENT_CONSTRAIN_EXTENSION            = 255
 SSH_AGENT_RSA_SHA2_256                   = 2
 SSH_AGENT_RSA_SHA2_512                   = 4
 
-# pylint: enable=bad-whitespace
-
 
 class SSHAgentKeyPair(SSHKeyPair):
     """Surrogate for a key managed by the SSH agent"""
 
     _key_type = 'agent'
 
-    def __init__(self, agent, algorithm, public_data, comment):
-        super().__init__(algorithm, public_data, comment)
+    def __init__(self, agent: 'SSHAgentClient', algorithm: bytes,
+                 public_data: bytes, comment: bytes):
+        is_cert = algorithm.endswith(b'-cert-v01@openssh.com')
 
-        self._agent = agent
-        self.sig_algorithm = algorithm
-        self.sig_algorithms = (algorithm,)
-        self.host_key_algorithms = self.sig_algorithms
-
-        self._cert = algorithm.endswith(b'-cert-v01@openssh.com')
-        self._flags = 0
-
-        self._set_algorithms()
-
-    def _set_algorithms(self):
-        """Set the algorithms associated with this key"""
-
-        if self._cert:
-            if self.algorithm.startswith(b'sk-'):
-                self.sig_algorithm = self.algorithm[:-21] + b'@openssh.com'
+        if is_cert:
+            if algorithm.startswith(b'sk-'):
+                sig_algorithm = algorithm[:-21] + b'@openssh.com'
             else:
-                self.sig_algorithm = self.algorithm[:-21]
+                sig_algorithm = algorithm[:-21]
+        else:
+            sig_algorithm = algorithm
 
         # Neither Pageant nor the Win10 OpenSSH agent seems to support the
         # ssh-agent protocol flags used to request RSA SHA2 signatures yet
-        if self.sig_algorithm == b'ssh-rsa' and sys.platform != 'win32':
-            self.sig_algorithms = (b'rsa-sha2-256', b'rsa-sha2-512',
-                                   b'ssh-rsa')
+        if sig_algorithm == b'ssh-rsa' and sys.platform != 'win32':
+            sig_algorithms: Sequence[bytes] = \
+                (b'rsa-sha2-256', b'rsa-sha2-512', b'ssh-rsa')
         else:
-            self.sig_algorithms = (self.sig_algorithm,)
+            sig_algorithms = (sig_algorithm,)
 
-        if self._cert:
-            self.host_key_algorithms = (self.algorithm,)
+        if is_cert:
+            host_key_algorithms: Sequence[bytes] = (algorithm,)
         else:
-            self.host_key_algorithms = self.sig_algorithms
+            host_key_algorithms = sig_algorithms
 
-    def set_certificate(self, cert):
+        super().__init__(algorithm, sig_algorithm, sig_algorithms,
+                         host_key_algorithms, public_data, comment)
+
+        self._agent = agent
+        self._is_cert = is_cert
+        self._flags = 0
+
+    def set_certificate(self, cert: SSHCertificate) -> None:
         """Set certificate to use with this key"""
 
-        if self.public_data != cert.key.public_data:
-            raise ValueError('Certificate key mismatch')
+        super().set_certificate(cert)
 
-        self._cert = True
-        self.algorithm = cert.algorithm
-        self.public_data = cert.public_data
-        self._set_algorithms()
+        self._is_cert = True
 
-    def set_sig_algorithm(self, sig_algorithm):
+    def set_sig_algorithm(self, sig_algorithm: bytes) -> None:
         """Set the signature algorithm to use when signing data"""
 
-        self.sig_algorithm = sig_algorithm
-
-        if not self._cert:
-            self.algorithm = sig_algorithm
+        super().set_sig_algorithm(sig_algorithm)
 
         if sig_algorithm == b'rsa-sha2-256':
             self._flags |= SSH_AGENT_RSA_SHA2_256
         elif sig_algorithm == b'rsa-sha2-512':
             self._flags |= SSH_AGENT_RSA_SHA2_512
 
-    async def sign(self, data):
-        """Sign a block of data with this private key"""
+    async def sign_async(self, data: bytes) -> bytes:
+        """Asynchronously sign a block of data with this private key"""
 
-        return await self._agent.sign(self.public_data, data, self._flags)
+        return await self._agent.sign(self.key_public_data, data, self._flags)
 
-    async def remove(self):
+    async def remove(self) -> None:
         """Remove this key pair from the agent"""
 
         await self._agent.remove_keys([self])
@@ -155,30 +180,33 @@ class SSHAgentKeyPair(SSHKeyPair):
 class SSHAgentClient:
     """SSH agent client"""
 
-    def __init__(self, agent_path):
+    def __init__(self, agent_path: _AgentPath):
         self._agent_path = agent_path
-        self._reader = None
-        self._writer = None
+        self._reader: Optional[AgentReader] = None
+        self._writer: Optional[AgentWriter] = None
         self._lock = asyncio.Lock()
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> 'SSHAgentClient':
         """Allow SSHAgentClient to be used as an async context manager"""
 
         return self
 
-    async def __aexit__(self, *exc_info):
+    async def __aexit__(self, exc_type: Optional[Type[BaseException]],
+                        exc_value: Optional[BaseException],
+                        traceback: Optional[TracebackType]) -> bool:
         """Wait for connection close when used as an async context manager"""
 
         await self._cleanup()
+        return False
 
-    async def _cleanup(self):
+    async def _cleanup(self) -> None:
         """Clean up this SSH agent client"""
 
         self.close()
         await self.wait_closed()
 
     @staticmethod
-    def encode_constraints(lifetime, confirm):
+    def encode_constraints(lifetime: Optional[int], confirm: bool) -> bytes:
         """Encode key constraints"""
 
         result = b''
@@ -191,16 +219,17 @@ class SSHAgentClient:
 
         return result
 
-    async def connect(self):
+    async def connect(self) -> None:
         """Connect to the SSH agent"""
 
-        if hasattr(self._agent_path, 'open_agent_connection'):
+        if isinstance(self._agent_path, str) or self._agent_path is None:
+            self._reader, self._writer = await open_agent(self._agent_path)
+        else:
             self._reader, self._writer = \
                 await self._agent_path.open_agent_connection()
-        else:
-            self._reader, self._writer = await open_agent(self._agent_path)
 
-    async def _make_request(self, msgtype, *args):
+    async def _make_request(self, msgtype: int, *args: bytes) -> \
+            Tuple[int, SSHPacket]:
         """Send an SSH agent request"""
 
         async with self._lock:
@@ -208,15 +237,18 @@ class SSHAgentClient:
                 if not self._writer:
                     await self.connect()
 
+                reader = self._reader
+                writer = self._writer
+
+                assert reader is not None
+                assert writer is not None
+
                 payload = Byte(msgtype) + b''.join(args)
-                self._writer.write(UInt32(len(payload)) + payload)
+                writer.write(UInt32(len(payload)) + payload)
 
-                resplen = await self._reader.readexactly(4)
-                resplen = int.from_bytes(resplen, 'big')
+                resplen = int.from_bytes((await reader.readexactly(4)), 'big')
 
-                resp = await self._reader.readexactly(resplen)
-                resp = SSHPacket(resp)
-
+                resp = SSHPacket((await reader.readexactly(resplen)))
                 resptype = resp.get_byte()
 
                 return resptype, resp
@@ -224,7 +256,8 @@ class SSHAgentClient:
                 await self._cleanup()
                 raise ValueError(str(exc)) from None
 
-    async def get_keys(self, identities=()):
+    async def get_keys(self, identities: Optional[Sequence[bytes]] = None) -> \
+            Sequence[SSHKeyPair]:
         """Request the available client keys
 
            This method is a coroutine which returns a list of client keys
@@ -242,7 +275,7 @@ class SSHAgentClient:
             await self._make_request(SSH_AGENTC_REQUEST_IDENTITIES)
 
         if resptype == SSH_AGENT_IDENTITIES_ANSWER:
-            result = []
+            result: List[SSHKeyPair] = []
 
             num_keys = resp.get_uint32()
             for _ in range(num_keys):
@@ -263,7 +296,8 @@ class SSHAgentClient:
         else:
             raise ValueError('Unknown SSH agent response: %d' % resptype)
 
-    async def sign(self, key_blob, data, flags=0):
+    async def sign(self, key_blob: bytes, data: bytes,
+                   flags: int = 0) -> bytes:
         """Sign a block of data with the requested key"""
 
         resptype, resp = await self._make_request(SSH_AGENTC_SIGN_REQUEST,
@@ -279,8 +313,9 @@ class SSHAgentClient:
         else:
             raise ValueError('Unknown SSH agent response: %d' % resptype)
 
-    async def add_keys(self, keylist=(), passphrase=None,
-                       lifetime=None, confirm=False):
+    async def add_keys(self, keylist: KeyPairListArg = (),
+                       passphrase: str = None, lifetime: int = None,
+                       confirm: bool = False) -> None:
         """Add keys to the agent
 
            This method adds a list of local private keys and optional
@@ -359,8 +394,9 @@ class SSHAgentClient:
             else:
                 raise ValueError('Unknown SSH agent response: %d' % resptype)
 
-    async def add_smartcard_keys(self, provider, pin=None,
-                                 lifetime=None, confirm=False):
+    async def add_smartcard_keys(self, provider: str, pin: str = None,
+                                 lifetime: int = None,
+                                 confirm: bool = False) -> None:
         """Store keys associated with a smart card in the agent
 
            :param provider:
@@ -398,7 +434,7 @@ class SSHAgentClient:
         else:
             raise ValueError('Unknown SSH agent response: %d' % resptype)
 
-    async def remove_keys(self, keylist):
+    async def remove_keys(self, keylist: Sequence[SSHKeyPair]) -> None:
         """Remove a key stored in the agent
 
            :param keylist:
@@ -421,7 +457,8 @@ class SSHAgentClient:
             else:
                 raise ValueError('Unknown SSH agent response: %d' % resptype)
 
-    async def remove_smartcard_keys(self, provider, pin=None):
+    async def remove_smartcard_keys(self, provider: str,
+                                    pin: str = None) -> None:
         """Remove keys associated with a smart card stored in the agent
 
            :param provider:
@@ -446,7 +483,7 @@ class SSHAgentClient:
         else:
             raise ValueError('Unknown SSH agent response: %d' % resptype)
 
-    async def remove_all(self):
+    async def remove_all(self) -> None:
         """Remove all keys stored in the agent
 
            :raises: :exc:`ValueError` if the keys can't be removed
@@ -463,7 +500,7 @@ class SSHAgentClient:
         else:
             raise ValueError('Unknown SSH agent response: %d' % resptype)
 
-    async def lock(self, passphrase):
+    async def lock(self, passphrase: str) -> None:
         """Lock the agent using the specified passphrase
 
            .. note:: The lock and unlock actions don't appear to be
@@ -487,7 +524,7 @@ class SSHAgentClient:
         else:
             raise ValueError('Unknown SSH agent response: %d' % resptype)
 
-    async def unlock(self, passphrase):
+    async def unlock(self, passphrase: str) -> None:
         """Unlock the agent using the specified passphrase
 
            .. note:: The lock and unlock actions don't appear to be
@@ -511,7 +548,7 @@ class SSHAgentClient:
         else:
             raise ValueError('Unknown SSH agent response: %d' % resptype)
 
-    async def query_extensions(self):
+    async def query_extensions(self) -> Sequence[str]:
         """Return a list of extensions supported by the agent
 
            :returns: A list of strings of supported extension names
@@ -528,11 +565,11 @@ class SSHAgentClient:
                 exttype = resp.get_string()
 
                 try:
-                    exttype = exttype.decode('utf-8')
+                    exttype_str = exttype.decode('utf-8')
                 except UnicodeDecodeError:
-                    raise ValueError('Invalid extension type name')
+                    raise ValueError('Invalid extension type name') from None
 
-                result.append(exttype)
+                result.append(exttype_str)
 
             return result
         elif resptype == SSH_AGENT_FAILURE:
@@ -540,7 +577,7 @@ class SSHAgentClient:
         else:
             raise ValueError('Unknown SSH agent response: %d' % resptype)
 
-    def close(self):
+    def close(self) -> None:
         """Close the SSH agent connection
 
            This method closes the connection to the ssh-agent. Any
@@ -552,7 +589,7 @@ class SSHAgentClient:
         if self._writer:
             self._writer.close()
 
-    async def wait_closed(self):
+    async def wait_closed(self) -> None:
         """Wait for this agent connection to close
 
            This method is a coroutine which can be called to block until
@@ -570,17 +607,18 @@ class SSHAgentClient:
 class SSHAgentListener:
     """Listener used to forward agent connections"""
 
-    def __init__(self, tempdir, path, unix_listener):
+    def __init__(self, tempdir: 'TemporaryDirectory[str]', path: str,
+                 unix_listener: SSHForwardListener):
         self._tempdir = tempdir
         self._path = path
         self._unix_listener = unix_listener
 
-    def get_path(self):
+    def get_path(self) -> str:
         """Return the path being listened on"""
 
         return self._path
 
-    def close(self):
+    def close(self) -> None:
         """Close the agent listener"""
 
         self._unix_listener.close()
@@ -588,7 +626,7 @@ class SSHAgentListener:
 
 
 @async_context_manager
-async def connect_agent(agent_path=None):
+async def connect_agent(agent_path: _AgentPath = None) -> 'SSHAgentClient':
     """Make a connection to the SSH agent
 
        This function attempts to connect to an ssh-agent process

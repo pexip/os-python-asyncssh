@@ -1,4 +1,4 @@
-# Copyright (c) 2020 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2020-2021 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -34,8 +34,6 @@ from .util import asynctest
 class _CheckPKCS11Auth(ServerTestCase):
     """Common code for testing security key authentication"""
 
-    # pylint: disable=bad-whitespace
-
     _certs_available = False
 
     _pkcs11_tokens = [
@@ -44,8 +42,6 @@ class _CheckPKCS11Auth(ServerTestCase):
         ('Token 2', b'5678', [('ecdsa-sha2-nistp384', 'EC key 2'),
                               ('ssh-ed25519',         'ED key (unsupported)')])
     ]
-
-    # pylint: enable=bad-whitespace
 
     @classmethod
     async def start_server(cls):
@@ -62,6 +58,18 @@ class _CheckPKCS11Auth(ServerTestCase):
 
         for key in pubkeys:
             key.append_public_key('auth_keys')
+
+        if pubkeys:
+            ca_key = asyncssh.read_private_key('ckey')
+
+            cert = ca_key.generate_user_certificate(pubkeys[0], 'name',
+                                                    principals=['ckey'])
+
+            with open('auth_keys', 'a') as auth_keys:
+                auth_keys.write('cert-authority ')
+
+            ca_key.append_public_key('auth_keys')
+            cert.write_certificate('pkcs11_cert.pub')
 
         auth_keys = 'auth_keys' if cls._pkcs11_tokens else ()
 
@@ -162,3 +170,13 @@ class _TestPKCS11Auth(_CheckPKCS11Auth):
                             username='ckey', pkcs11_provider='xxx',
                             client_keys=[key], signature_algs=[sig_alg]):
                         pass
+
+    @asynctest
+    async def test_pkcs11_with_replaced_cert(self):
+        """Test authenticating with a PKCS#11 with replaced cert"""
+
+        ckey = asyncssh.load_pkcs11_keys('xxx')[1]
+
+        async with self.connect(username='ckey', pkcs11_provider='xxx',
+                                client_keys=[(ckey, 'pkcs11_cert.pub')]):
+            pass

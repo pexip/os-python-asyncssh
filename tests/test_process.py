@@ -1,4 +1,4 @@
-# Copyright (c) 2016-2020 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2016-2021 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -73,9 +73,15 @@ async def _handle_client(process):
     elif action == 'redirect_stderr':
         await process.redirect_stderr(process.stdin)
         await process.stderr.drain()
-    elif action == 'term':
+    elif action == 'old_term':
         info = str((process.get_terminal_type(), process.get_terminal_size(),
                     process.get_terminal_mode(asyncssh.PTY_OP_OSPEED)))
+        process.channel.set_encoding('utf-8')
+        process.stdout.write(info)
+    elif action == 'term':
+        info = str((process.term_type, process.term_size,
+                    process.term_modes.get(asyncssh.PTY_OP_OSPEED),
+                    sorted(process.term_modes.items())))
         process.channel.set_encoding('utf-8')
         process.stdout.write(info)
     elif action == 'term_size':
@@ -211,10 +217,24 @@ class _TestProcessBasic(_TestProcess):
         self.assertEqual(result.stdout, 'test')
 
     @asynctest
-    async def test_terminal_info(self):
-        """Test sending terminal information"""
+    async def test_old_terminal_info(self):
+        """Test setting and retrieving terminal information with old API"""
 
         modes = {asyncssh.PTY_OP_OSPEED: 9600}
+
+        async with self.connect() as conn:
+            process = await conn.create_process('old_term', term_type='ansi',
+                                                term_size=(80, 24),
+                                                term_modes=modes)
+            result = await process.wait()
+
+        self.assertEqual(result.stdout, "('ansi', (80, 24, 0, 0), 9600)")
+
+    @asynctest
+    async def test_terminal_info(self):
+        """Test setting and retrieving terminal information"""
+
+        modes = {asyncssh.PTY_OP_ISPEED: 9600, asyncssh.PTY_OP_OSPEED: 9600}
 
         async with self.connect() as conn:
             process = await conn.create_process('term', term_type='ansi',
@@ -222,7 +242,8 @@ class _TestProcessBasic(_TestProcess):
                                                 term_modes=modes)
             result = await process.wait()
 
-        self.assertEqual(result.stdout, "('ansi', (80, 24, 0, 0), 9600)")
+        self.assertEqual(result.stdout, "('ansi', (80, 24, 0, 0), 9600, "
+                                        "[(128, 9600), (129, 9600)])")
 
     @asynctest
     async def test_change_terminal_size(self):
@@ -388,6 +409,19 @@ class _TestProcessBasic(_TestProcess):
         async with self.connect() as conn:
             with self.assertRaises(asyncssh.ProtocolError):
                 await conn.run('echo', stdin='stdin')
+
+    @asynctest
+    async def test_ignoring_invalid_unicode(self):
+        """Test ignoring invalid Unicode data"""
+
+        data = b'\xfftest'
+
+        with open('stdin', 'wb') as file:
+            file.write(data)
+
+        async with self.connect() as conn:
+            await conn.run('echo', stdin='stdin',
+                           encoding='utf-8', errors='ignore')
 
     @asynctest
     async def test_incomplete_unicode(self):

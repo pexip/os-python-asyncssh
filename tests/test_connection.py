@@ -1,4 +1,4 @@
-# Copyright (c) 2016-2020 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2016-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -23,7 +23,9 @@
 import asyncio
 from copy import copy
 import os
+from pathlib import Path
 import socket
+import subprocess
 import sys
 import unittest
 from unittest.mock import patch
@@ -43,11 +45,21 @@ from asyncssh.encryption import get_encryption_algs
 from asyncssh.kex import get_kex_algs
 from asyncssh.mac import _HMAC, _mac_handler, get_mac_algs
 from asyncssh.packet import Boolean, NameList, String, UInt32
+from asyncssh.public_key import get_default_public_key_algs
+from asyncssh.public_key import get_default_certificate_algs
+from asyncssh.public_key import get_default_x509_certificate_algs
 
 from .server import Server, ServerTestCase
 
-from .util import asynctest, gss_available, patch_gss
+from .util import asynctest, gss_available, patch_gss, run
 from .util import patch_getnameinfo, x509_available
+
+
+try:
+    run('which nc')
+    _nc_available = True
+except subprocess.CalledProcessError: # pragma: no cover
+    _nc_available = False
 
 
 class _CheckAlgsClientConnection(asyncssh.SSHClientConnection):
@@ -57,6 +69,11 @@ class _CheckAlgsClientConnection(asyncssh.SSHClientConnection):
         """Return the selected encryption algorithms"""
 
         return self._enc_algs
+
+    def get_server_host_key_algs(self):
+        """Return the selected server host key algorithms"""
+
+        return self._server_host_key_algs
 
 
 class _SplitClientConnection(asyncssh.SSHClientConnection):
@@ -157,7 +174,7 @@ class _ExtInfoServerConnection(asyncssh.SSHServerConnection):
     def _send_ext_info(self):
         """Send extension information"""
 
-        self._extensions_sent['xxx'] = b''
+        self._extensions_to_send['xxx'] = b''
         super()._send_ext_info()
 
 
@@ -331,6 +348,7 @@ def disconnect_on_unimplemented(self, pkttype, pktid, packet):
 
 
 @patch_gss
+@patch('asyncssh.connection.SSHClientConnection', _CheckAlgsClientConnection)
 class _TestConnection(ServerTestCase):
     """Unit tests for AsyncSSH connection API"""
 
@@ -352,7 +370,7 @@ class _TestConnection(ServerTestCase):
                                         acceptor=acceptor))
 
     async def get_server_host_key(self, **kwargs):
-        """Create a connection to the test server"""
+        """Get host key from the test server"""
 
         return (await asyncssh.get_server_host_key(self._server_addr,
                                                    self._server_port,
@@ -394,14 +412,43 @@ class _TestConnection(ServerTestCase):
         """Test failure connecting"""
 
         with self.assertRaises(OSError):
-            await asyncssh.connect('0.0.0.1')
+            await asyncssh.connect('\xff')
 
     @asynctest
     async def test_connect_failure_without_agent(self):
         """Test failure connecting with SSH agent disabled"""
 
         with self.assertRaises(OSError):
-            await asyncssh.connect('0.0.0.1', agent_path=None)
+            await asyncssh.connect('\xff', agent_path=None)
+
+    @asynctest
+    async def test_connect_timeout_exceeded(self):
+        """Test connect timeout exceeded"""
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncssh.connect('223.255.255.254', connect_timeout=1)
+
+    @asynctest
+    async def test_connect_timeout_exceeded_string(self):
+        """Test connect timeout exceeded with string value"""
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncssh.connect('223.255.255.254', connect_timeout='0m1s')
+
+    @asynctest
+    async def test_connect_timeout_exceeded_tunnel(self):
+        """Test connect timeout exceeded"""
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncssh.listen(server_host_keys=['skey'],
+                                  tunnel='223.255.255.254', connect_timeout=1)
+
+    @asynctest
+    async def test_invalid_connect_timeout(self):
+        """Test invalid connect timeout"""
+
+        with self.assertRaises(ValueError):
+            await self.connect(connect_timeout=-1)
 
     @asynctest
     async def test_connect_tcp_keepalive_off(self):
@@ -506,7 +553,30 @@ class _TestConnection(ServerTestCase):
         """Test failure connecting when retrieving a server host key"""
 
         with self.assertRaises(OSError):
-            await asyncssh.get_server_host_key('0.0.0.1')
+            await asyncssh.get_server_host_key('\xff')
+
+    @unittest.skipUnless(_nc_available, 'Netcat not available')
+    @asynctest
+    async def test_get_server_host_key_proxy(self):
+        """Test retrieving a server host key using proxy command"""
+
+        keylist = asyncssh.load_public_keys('skey.pub')
+        proxy_command = ('nc', str(self._server_addr), str(self._server_port))
+
+        key = await self.get_server_host_key(proxy_command=proxy_command)
+
+        self.assertEqual(key, keylist[0])
+
+    @unittest.skipUnless(_nc_available, 'Netcat not available')
+    @asynctest
+    async def test_get_server_host_key_proxy_failure(self):
+        """Test failure retrieving a server host key using proxy command"""
+
+        # Leave out arguments to 'nc' to trigger a faliure
+        proxy_command = 'nc'
+
+        with self.assertRaises((OSError, asyncssh.ConnectionLost)):
+            await self.connect(proxy_command=proxy_command)
 
     @asynctest
     async def test_known_hosts_not_present(self):
@@ -539,31 +609,44 @@ class _TestConnection(ServerTestCase):
     async def test_known_hosts_none(self):
         """Test connecting with known hosts checking disabled"""
 
-        async with self.connect(known_hosts=None):
-            pass
+        default_algs = get_default_x509_certificate_algs() + \
+                       get_default_certificate_algs() + \
+                       get_default_public_key_algs()
+
+        async with self.connect(known_hosts=None) as conn:
+            self.assertEqual(conn.get_server_host_key_algs(), default_algs)
 
     @asynctest
     async def test_known_hosts_none_without_x509(self):
         """Test connecting with known hosts checking and X.509 disabled"""
 
+        non_x509_algs = get_default_certificate_algs() + \
+                        get_default_public_key_algs()
+
         async with self.connect(known_hosts=None,
-                                x509_trusted_certs=None):
-            pass
+                                x509_trusted_certs=None) as conn:
+            self.assertEqual(conn.get_server_host_key_algs(), non_x509_algs)
 
     @asynctest
     async def test_known_hosts_multiple_keys(self):
         """Test connecting with multiple trusted known hosts keys"""
 
-        async with self.connect(known_hosts=(['skey.pub', 'skey.pub'],
-                                             [], [])):
-            pass
+        rsa_algs = [alg for alg in get_default_public_key_algs()
+                    if b'rsa' in alg]
+
+        async with self.connect(x509_trusted_certs=None,
+                                known_hosts=(['skey.pub', 'skey.pub'],
+                                             [], [])) as conn:
+            self.assertEqual(conn.get_server_host_key_algs(), rsa_algs)
 
     @asynctest
     async def test_known_hosts_ca(self):
         """Test connecting with a known hosts CA"""
 
-        async with self.connect(known_hosts=([], ['skey.pub'], [])):
-            pass
+        async with self.connect(known_hosts=([], ['skey.pub'], [])) as conn:
+            self.assertEqual(conn.get_server_host_key_algs(),
+                             get_default_x509_certificate_algs() +
+                             get_default_certificate_algs())
 
     @asynctest
     async def test_known_hosts_bytes(self):
@@ -700,6 +783,20 @@ class _TestConnection(ServerTestCase):
                 await self.connect()
 
     @asynctest
+    async def test_changing_server_host_key(self):
+        """Test changing server host key"""
+
+        self._server.update(server_host_keys=['skey_ecdsa'])
+
+        async with self.connect(known_hosts=None):
+            pass
+
+        self._server.update(server_host_keys=['skey'])
+
+        with self.assertRaises(asyncssh.KeyExchangeFailed):
+            await self.connect(known_hosts=(['skey_ecdsa.pub'], [], []))
+
+    @asynctest
     async def test_kex_algs(self):
         """Test connecting with different key exchange algorithms"""
 
@@ -769,7 +866,17 @@ class _TestConnection(ServerTestCase):
         """Test connecting with invalid key exchange algorithm pattern"""
 
         with self.assertRaises(ValueError):
-            await self.connect(kex_algs='xxx')
+            await self.connect(kex_algs='diffie-hallman-group14-sha1,xxx')
+
+    @asynctest
+    async def test_invalid_kex_alg_config(self):
+        """Test connecting with invalid key exchange algorithm config"""
+
+        with open('config', 'w') as f:
+            f.write('KexAlgorithms diffie-hellman-group14-sha1,xxx')
+
+        async with self.connect(config='config'):
+            pass
 
     @asynctest
     async def test_unsupported_kex_alg(self):
@@ -1181,6 +1288,17 @@ class _TestConnection(ServerTestCase):
         await conn.wait_closed()
 
     @asynctest
+    async def test_no_local_username(self):
+        """Test username being too long in userauth request"""
+
+        def _failing_getuser():
+            raise KeyError
+
+        with patch('getpass.getuser', _failing_getuser):
+            with self.assertRaises(ValueError):
+                await self.connect()
+
+    @asynctest
     async def test_invalid_username(self):
         """Test invalid username in userauth request"""
 
@@ -1408,6 +1526,16 @@ class _TestConnectionReverse(ServerTestCase):
         with self.assertLogs(level='INFO'):
             async with self.connect_reverse():
                 pass
+
+    @unittest.skipUnless(_nc_available, 'Netcat not available')
+    @asynctest
+    async def test_connect_reverse_proxy(self):
+        """Test reverse direction SSH connection with proxy command"""
+
+        proxy_command = ('nc', str(self._server_addr), str(self._server_port))
+
+        async with self.connect_reverse(proxy_command=proxy_command):
+            pass
 
     @asynctest
     async def test_connect_reverse_options(self):
@@ -1674,6 +1802,29 @@ class _TestServerX509Chain(ServerTestCase):
                                             ['int_ca_cert.pem'], [], []))
 
     @asynctest
+    async def test_connect_x509_openssh_known_hosts_trusted(self):
+        """Test connecting with OpenSSH cert in known hosts trusted list"""
+
+        with self.assertRaises(ValueError):
+            await self.connect(known_hosts=[[], [], [], 'skey-cert.pub',
+                                            [], [], []])
+
+    @asynctest
+    async def test_connect_x509_openssh_known_hosts_revoked(self):
+        """Test connecting with OpenSSH cert in known hosts revoked list"""
+
+        with self.assertRaises(ValueError):
+            await self.connect(known_hosts=[[], [], [], [], 'skey-cert.pub',
+                                            [], []])
+
+    @asynctest
+    async def test_connect_x509_openssh_x509_trusted(self):
+        """Test connecting with OpenSSH cert in X.509 trusted certs list"""
+
+        with self.assertRaises(ValueError):
+            await self.connect(x509_trusted_certs='skey-cert.pub')
+
+    @asynctest
     async def test_invalid_x509_path(self):
         """Test passing in invalid trusted X.509 certificate path"""
 
@@ -1709,6 +1860,7 @@ class _TestServerNoHostKey(ServerTestCase):
             await self.connect()
 
 
+@patch('asyncssh.connection.SSHClientConnection', _CheckAlgsClientConnection)
 class _TestServerWithoutCert(ServerTestCase):
     """Unit tests with a server that advertises a host key instead of a cert"""
 
@@ -1752,6 +1904,26 @@ class _TestServerWithoutCert(ServerTestCase):
             pass
 
     @asynctest
+    async def test_default_server_host_keys(self):
+        """Test validation with default server host key algs"""
+
+        def client_factory():
+            """Return an SSHClient which can validate the sevrer host key"""
+
+            return _ValidateHostKeyClient(host_key='skey.pub')
+
+        default_algs = get_default_x509_certificate_algs() + \
+                       get_default_certificate_algs() + \
+                       get_default_public_key_algs()
+
+        conn, _ = await self.create_connection(client_factory,
+                                               known_hosts=([], [], []),
+                                               server_host_key_algs='default')
+
+        async with conn:
+            self.assertEqual(conn.get_server_host_key_algs(), default_algs)
+
+    @asynctest
     async def test_untrusted_known_hosts_key(self):
         """Test untrusted server host key"""
 
@@ -1763,6 +1935,77 @@ class _TestServerWithoutCert(ServerTestCase):
         """Test disabled known hosts checking with server host key"""
 
         async with self.connect(known_hosts=None):
+            pass
+
+
+class _TestHostKeyAlias(ServerTestCase):
+    """Unit test for HostKeyAlias"""
+
+    @classmethod
+    async def start_server(cls):
+        """Start an SSH server to connect to"""
+
+        skey = asyncssh.read_private_key('skey')
+        skey_cert = skey.generate_host_certificate(
+            skey, 'name', principals=['certifiedfakehost'])
+        skey_cert.write_certificate('skey-cert.pub')
+
+        return await cls.create_server(server_host_keys=['skey'])
+
+    @classmethod
+    async def asyncSetUpClass(cls):
+        """Set up keys, custom host cert, and suitable known_hosts"""
+
+        await super().asyncSetUpClass()
+
+        skey_str = Path('skey.pub').read_text()
+
+        Path('.ssh/known_hosts').write_text(
+            f"fakehost {skey_str}"
+            f"@cert-authority certifiedfakehost {skey_str}")
+
+        Path('.ssh/config').write_text(
+            'Host server-with-key-config\n'
+            '  Hostname 127.0.0.1\n'
+            '  HostKeyAlias fakehost\n'
+            '\n'
+            'Host server-with-cert-config\n'
+            '  Hostname 127.0.0.1\n'
+            '  HostKeyAlias certifiedfakehost\n')
+
+    @asynctest
+    async def test_host_key_mismatch(self):
+        """Test host key mismatch"""
+
+        with self.assertRaises(asyncssh.HostKeyNotVerifiable):
+            await self.connect()
+
+    @asynctest
+    async def test_host_key_match(self):
+        """Test host key match"""
+
+        async with self.connect(host_key_alias='fakehost'):
+            pass
+
+    @asynctest
+    async def test_host_cert_match(self):
+        """Test host cert match"""
+
+        async with self.connect(host_key_alias='certifiedfakehost'):
+            pass
+
+    @asynctest
+    async def test_host_key_match_config(self):
+        """Test host key match using HostKeyAlias in config file"""
+
+        async with self.connect('server-with-key-config'):
+            pass
+
+    @asynctest
+    async def test_host_cert_match_config(self):
+        """Test host cert match using HostKeyAlias in config file"""
+
+        async with self.connect('server-with-cert-config'):
             pass
 
 
@@ -1925,3 +2168,23 @@ class _TestReverseDNS(ServerTestCase):
 
         with self.assertRaises(asyncssh.PermissionDenied):
             await self.connect(username='ckey')
+
+
+class _TestListenerContextManager(ServerTestCase):
+    """Test using an SSH listener as a context manager"""
+
+    @classmethod
+    async def start_server(cls):
+        """Defer starting the SSH server to the test"""
+
+    @asynctest
+    async def test_ssh_listen_context_manager(self):
+        """Test using an SSH listener as a context manager"""
+
+        async with self.listen() as server:
+            listen_port = server.sockets[0].getsockname()[1]
+
+
+            async with asyncssh.connect('127.0.0.1', listen_port,
+                                        known_hosts=(['skey.pub'], [], [])):
+                pass

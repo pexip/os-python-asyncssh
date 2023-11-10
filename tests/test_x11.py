@@ -1,4 +1,4 @@
-# Copyright (c) 2016-2020 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2016-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -50,11 +50,11 @@ def _failing_bind(self, address):
     raise OSError
 
 
-async def _create_x11_process(conn, command=None,
+async def _create_x11_process(conn, command=None, x11_forwarding=True,
                               x11_display='test:0', **kwargs):
     """Create a client process with X11 forwarding enabled"""
 
-    return await conn.create_process(command, x11_forwarding=True,
+    return await conn.create_process(command, x11_forwarding=x11_forwarding,
                                      x11_display=x11_display, **kwargs)
 
 
@@ -238,6 +238,12 @@ class _X11Server(Server):
                     result = None
 
                 stdin.channel.exit(bool(result))
+            elif action == 'invalid':
+                try:
+                    result = await self._conn.create_x11_connection(
+                        None, b'\xff')
+                except asyncssh.ChannelOpenError:
+                    pass
             elif action == 'sleep':
                 await asyncio.sleep(0.1)
             else:
@@ -273,12 +279,12 @@ class _TestX11(ServerTestCase):
                 XAUTH_PROTO_COOKIE, auth_data)))
 
             auth_file.write(bytes(SSHXAuthorityEntry(
-                XAUTH_FAMILY_IPV4, socket.inet_pton(socket.AF_INET, '0.0.0.2'),
-                b'0', XAUTH_PROTO_COOKIE, auth_data)))
+                XAUTH_FAMILY_IPV4, socket.inet_pton(socket.AF_INET,
+                '127.0.0.2'), b'0', XAUTH_PROTO_COOKIE, auth_data)))
 
             auth_file.write(bytes(SSHXAuthorityEntry(
-                XAUTH_FAMILY_IPV4, socket.inet_pton(socket.AF_INET, '0.0.0.1'),
-                b'0', XAUTH_PROTO_COOKIE, auth_data)))
+                XAUTH_FAMILY_IPV4, socket.inet_pton(socket.AF_INET,
+                '127.0.0.1'), b'0', XAUTH_PROTO_COOKIE, auth_data)))
 
             auth_file.write(bytes(SSHXAuthorityEntry(
                 XAUTH_FAMILY_IPV6, socket.inet_pton(socket.AF_INET6, '::2'),
@@ -417,7 +423,7 @@ class _TestX11(ServerTestCase):
     async def test_ipv4_address(self):
         """Test matching against an IPv4 address"""
 
-        await self._check_x11(x11_display='0.0.0.1:0')
+        await self._check_x11(x11_display='127.0.0.1:0')
 
     @asynctest
     async def test_ipv6_address(self):
@@ -517,6 +523,14 @@ class _TestX11(ServerTestCase):
             await _create_x11_process(conn, 'sleep', x11_display='test:0')
 
     @asynctest
+    async def test_from_connect(self):
+        """Test requesting X11 forwarding on connection"""
+
+        async with self.connect(x11_forwarding=True,
+                                x11_display='text:0') as conn:
+            await conn.create_process('sleep')
+
+    @asynctest
     async def test_multiple_sessions(self):
         """Test requesting X11 forwarding from two different sessions"""
 
@@ -588,6 +602,14 @@ class _TestX11(ServerTestCase):
             self.assertEqual(result.exit_status, 0)
 
     @asynctest
+    async def test_open_invalid_unicode(self):
+        """Test opening X11 connection with invalid unicode in original host"""
+
+        async with self.connect() as conn:
+            result = await conn.run('invalid')
+            self.assertEqual(result.exit_status, None)
+
+    @asynctest
     async def test_forwarding_not_allowed(self):
         """Test an X11 request from a non-authorized user"""
 
@@ -599,6 +621,24 @@ class _TestX11(ServerTestCase):
                                 agent_path=None) as conn:
             with self.assertRaises(asyncssh.ChannelOpenError):
                 await _create_x11_process(conn, 'connect l')
+
+    @asynctest
+    async def test_forwarding_ignore_failure(self):
+        """Test ignoring failure on an X11 forwarding request"""
+
+        ckey = asyncssh.read_private_key('ckey')
+        cert = ckey.generate_user_certificate(ckey, 'name', principals=['ckey'],
+                                              permit_x11_forwarding=False)
+
+        async with self.connect(username='ckey', client_keys=[(ckey, cert)],
+                                agent_path=None) as conn:
+            proc = await _create_x11_process(
+                conn, x11_forwarding='ignore_failure', x11_display='test')
+            await proc.wait()
+
+            proc = await _create_x11_process(
+                conn, x11_forwarding='ignore_failure')
+            await proc.wait()
 
     @asynctest
     async def test_invalid_x11_forwarding_request(self):

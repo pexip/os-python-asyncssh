@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2020 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2014-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -71,11 +71,21 @@ except subprocess.CalledProcessError: # pragma: no cover
 
 _openssl_available = _openssl_version != b''
 
+if _openssl_available: # pragma: no branch
+    _openssl_curves = run('openssl ecparam -list_curves')
+else: # pragma: no cover
+    _openssl_curves = b''
+
 # The openssl "-v2prf" option is only available in OpenSSL 1.0.2 or later
 _openssl_supports_v2prf = _openssl_version >= b'OpenSSL 1.0.2'
 
 # Ed25519/Ed448 support via "pkey" is only available in OpenSSL 1.1.1 or later
 _openssl_supports_pkey = _openssl_version >= b'OpenSSL 1.1.1'
+
+if _openssl_version >= b'OpenSSL 3': # pragma: no branch
+    _openssl_legacy = '-provider default -provider legacy '
+else: # pragma: no cover
+    _openssl_legacy = ''
 
 try:
     if sys.platform != 'win32':
@@ -93,36 +103,47 @@ _openssh_supports_gcm_chacha = _openssh_version >= b'OpenSSH_6.9'
 _openssh_supports_arcfour_blowfish_cast = (_openssh_available and
                                            _openssh_version < b'OpenSSH_7.6')
 
-# pylint: disable=bad-whitespace
-
-pkcs1_ciphers = (('aes128-cbc', '-aes128'),
-                 ('aes192-cbc', '-aes192'),
-                 ('aes256-cbc', '-aes256'),
-                 ('des-cbc',    '-des'),
-                 ('des3-cbc',   '-des3'))
+pkcs1_ciphers = (('aes128-cbc', '-aes128', False),
+                 ('aes192-cbc', '-aes192', False),
+                 ('aes256-cbc', '-aes256', False),
+                 ('des-cbc',    '-des',    True),
+                 ('des3-cbc',   '-des3',   False))
 
 pkcs8_ciphers = (
     ('aes128-cbc',   'sha224', 2, '-v2 aes-128-cbc '
-     '-v2prf hmacWithSHA224', _openssl_supports_v2prf),
+     '-v2prf hmacWithSHA224', _openssl_supports_v2prf, False),
     ('aes128-cbc',   'sha256', 2, '-v2 aes-128-cbc '
-     '-v2prf hmacWithSHA256', _openssl_supports_v2prf),
+     '-v2prf hmacWithSHA256', _openssl_supports_v2prf, False),
     ('aes128-cbc',   'sha384', 2, '-v2 aes-128-cbc '
-     '-v2prf hmacWithSHA384', _openssl_supports_v2prf),
+     '-v2prf hmacWithSHA384', _openssl_supports_v2prf, False),
     ('aes128-cbc',   'sha512', 2, '-v2 aes-128-cbc '
-     '-v2prf hmacWithSHA512', _openssl_supports_v2prf),
-    ('des-cbc',      'md5',    1, '-v1 PBE-MD5-DES',       _openssl_available),
-    ('des-cbc',      'sha1',   1, '-v1 PBE-SHA1-DES',      _openssl_available),
-    ('des2-cbc',     'sha1',   1, '-v1 PBE-SHA1-2DES',     _openssl_available),
-    ('des3-cbc',     'sha1',   1, '-v1 PBE-SHA1-3DES',     _openssl_available),
-    ('rc4-40',       'sha1',   1, '-v1 PBE-SHA1-RC4-40',   _openssl_available),
-    ('rc4-128',      'sha1',   1, '-v1 PBE-SHA1-RC4-128',  _openssl_available),
-    ('aes128-cbc',   'sha1',   2, '-v2 aes-128-cbc',       _openssl_available),
-    ('aes192-cbc',   'sha1',   2, '-v2 aes-192-cbc',       _openssl_available),
-    ('aes256-cbc',   'sha1',   2, '-v2 aes-256-cbc',       _openssl_available),
-    ('blowfish-cbc', 'sha1',   2, '-v2 bf-cbc',            _openssl_available),
-    ('cast128-cbc',  'sha1',   2, '-v2 cast-cbc',          _openssl_available),
-    ('des-cbc',      'sha1',   2, '-v2 des-cbc',           _openssl_available),
-    ('des3-cbc',     'sha1',   2, '-v2 des-ede3-cbc',      _openssl_available))
+     '-v2prf hmacWithSHA512', _openssl_supports_v2prf, False),
+    ('des-cbc',      'md5',    1, '-v1 PBE-MD5-DES',
+                              _openssl_available,      True),
+    ('des-cbc',      'sha1',   1, '-v1 PBE-SHA1-DES',
+                               _openssl_available,     True),
+    ('des2-cbc',     'sha1',   1, '-v1 PBE-SHA1-2DES',
+                              _openssl_available,      False),
+    ('des3-cbc',     'sha1',   1, '-v1 PBE-SHA1-3DES',
+                              _openssl_available,      False),
+    ('rc4-40',       'sha1',   1, '-v1 PBE-SHA1-RC4-40',
+                              _openssl_available,      True),
+    ('rc4-128',      'sha1',   1, '-v1 PBE-SHA1-RC4-128',
+                              _openssl_available,      True),
+    ('aes128-cbc',   'sha1',   2, '-v2 aes-128-cbc',
+                              _openssl_available,      False),
+    ('aes192-cbc',   'sha1',   2, '-v2 aes-192-cbc',
+                              _openssl_available,      False),
+    ('aes256-cbc',   'sha1',   2, '-v2 aes-256-cbc',
+                              _openssl_available,      False),
+    ('blowfish-cbc', 'sha1',   2, '-v2 bf-cbc',
+                              _openssl_available,      True),
+    ('cast128-cbc',  'sha1',   2, '-v2 cast-cbc',
+                              _openssl_available,      True),
+    ('des-cbc',      'sha1',   2, '-v2 des-cbc',
+                              _openssl_available,      True),
+    ('des3-cbc',     'sha1',   2, '-v2 des-ede3-cbc',
+                              _openssl_available,      False))
 
 openssh_ciphers = (
     ('aes128-gcm@openssh.com',  _openssh_supports_gcm_chacha),
@@ -140,8 +161,6 @@ openssh_ciphers = (
     ('aes256-ctr',              _openssh_available),
     ('3des-cbc',                _openssh_available)
 )
-
-# pylint: enable=bad-whitespace
 
 if chacha_available: # pragma: no branch
     openssh_ciphers += (('chacha20-poly1305@openssh.com',
@@ -497,7 +516,7 @@ class _TestPublicKey(TempDirTestCase):
 
         self.check_private(format_name, select_passphrase(cipher))
 
-    def export_pkcs1_private(self, fmt, cipher=None):
+    def export_pkcs1_private(self, fmt, cipher=None, legacy_args=None):
         """Check export of a PKCS#1 private key"""
 
         format_name = 'pkcs1-%s' % fmt
@@ -506,8 +525,9 @@ class _TestPublicKey(TempDirTestCase):
 
         if self.use_openssl: # pragma: no branch
             if cipher:
-                run('openssl %s -in privout -inform %s -out new -outform pem '
-                    '-passin pass:passphrase' % (self.keyclass, fmt))
+                run('openssl %s %s -in privout -inform %s -out new '
+                    '-outform pem -passin pass:passphrase' %
+                    (self.keyclass, legacy_args, fmt))
             else:
                 run('openssl %s -in privout -inform %s -out new -outform pem' %
                     (self.keyclass, fmt))
@@ -576,7 +596,8 @@ class _TestPublicKey(TempDirTestCase):
         self.check_private(format_name, select_passphrase(cipher, pbe_version))
 
     def export_pkcs8_private(self, fmt, openssl_ok=True, cipher=None,
-                             hash_alg=None, pbe_version=None):
+                             hash_alg=None, pbe_version=None,
+                             legacy_args=None):
         """Check export of a PKCS#8 private key"""
 
         format_name = 'pkcs8-%s' % fmt
@@ -586,8 +607,9 @@ class _TestPublicKey(TempDirTestCase):
 
         if self.use_openssl and openssl_ok: # pragma: no branch
             if cipher:
-                run('openssl pkcs8 -in privout -inform %s -out new '
-                    '-outform pem -passin pass:passphrase' % fmt)
+                run('openssl pkcs8 %s -in privout -inform %s -out new '
+                    '-outform pem -passin pass:passphrase' %
+                    (legacy_args, fmt))
             else:
                 run('openssl pkcs8 -nocrypt -in privout -inform %s -out new '
                     '-outform pem' % fmt)
@@ -1373,7 +1395,9 @@ class _TestPublicKey(TempDirTestCase):
                 self.assertEqual(cert.get_comment(), 'user_comment')
 
                 cert = self.privca.generate_user_certificate(
-                    self.pubkey, 'name', comment='cert_comment')
+                    self.pubkey, 'name', principals='name1,name2',
+                    comment='cert_comment')
+                self.assertEqual(cert.principals, ['name1', 'name2'])
                 self.assertEqual(cert.get_comment_bytes(), b'cert_comment')
                 self.assertEqual(cert.get_comment(), 'cert_comment')
 
@@ -1383,7 +1407,9 @@ class _TestPublicKey(TempDirTestCase):
                 self.assertEqual(cert.get_comment(), 'host_comment')
 
                 cert = self.privca.generate_host_certificate(
-                    self.pubkey, 'name', comment=b'\xff')
+                    self.pubkey, 'name', principals=['name1', 'name2'],
+                    comment=b'\xff')
+                self.assertEqual(cert.principals, ['name1', 'name2'])
                 self.assertEqual(cert.get_comment_bytes(), b'\xff')
                 with self.assertRaises(UnicodeDecodeError):
                     cert.get_comment()
@@ -1531,12 +1557,14 @@ class _TestPublicKey(TempDirTestCase):
         with self.subTest('Export PKCS#1 DER private'):
             self.export_pkcs1_private('der')
 
-        for cipher, args in pkcs1_ciphers:
+        for cipher, args, legacy in pkcs1_ciphers:
+            legacy_args = _openssl_legacy if legacy else ''
+
             with self.subTest('Import PKCS#1 PEM private (%s)' % cipher):
-                self.import_pkcs1_private('pem', cipher, args)
+                self.import_pkcs1_private('pem', cipher, legacy_args + args)
 
             with self.subTest('Export PKCS#1 PEM private (%s)' % cipher):
-                self.export_pkcs1_private('pem', cipher)
+                self.export_pkcs1_private('pem', cipher, legacy_args)
 
     def check_pkcs1_public(self):
         """Check PKCS#1 public key format"""
@@ -1568,26 +1596,31 @@ class _TestPublicKey(TempDirTestCase):
         with self.subTest('Export PKCS#8 DER private'):
             self.export_pkcs8_private('der')
 
-        for cipher, hash_alg, pbe_version, args, openssl_ok in pkcs8_ciphers:
+        for cipher, hash_alg, pbe_version, args, \
+                openssl_ok, legacy in pkcs8_ciphers:
+            legacy_args = _openssl_legacy if legacy else ''
+
             with self.subTest('Import PKCS#8 PEM private (%s-%s-v%s)' %
                               (cipher, hash_alg, pbe_version)):
                 self.import_pkcs8_private('pem', openssl_ok, cipher,
-                                          hash_alg, pbe_version, args)
+                                          hash_alg, pbe_version,
+                                          legacy_args + args)
 
             with self.subTest('Export PKCS#8 PEM private (%s-%s-v%s)' %
                               (cipher, hash_alg, pbe_version)):
                 self.export_pkcs8_private('pem', openssl_ok, cipher,
-                                          hash_alg, pbe_version)
+                                          hash_alg, pbe_version, legacy_args)
 
             with self.subTest('Import PKCS#8 DER private (%s-%s-v%s)' %
                               (cipher, hash_alg, pbe_version)):
                 self.import_pkcs8_private('der', openssl_ok, cipher,
-                                          hash_alg, pbe_version, args)
+                                          hash_alg, pbe_version,
+                                          legacy_args + args)
 
             with self.subTest('Export PKCS#8 DER private (%s-%s-v%s)' %
                               (cipher, hash_alg, pbe_version)):
                 self.export_pkcs8_private('der', openssl_ok, cipher,
-                                          hash_alg, pbe_version)
+                                          hash_alg, pbe_version, legacy_args)
 
     def check_pkcs8_public(self):
         """Check PKCS#8 public key format"""
@@ -2232,9 +2265,9 @@ class _TestPublicKeyTopLevel(TempDirTestCase):
                         '-param_enc explicit' % curve)
                     asyncssh.read_private_key('priv')
 
-    @unittest.skipIf(b'secp224r1' not in run('openssl ecparam -list_curves'),
-                     "this openssl doesn't support secp224r1")
     @unittest.skipIf(not _openssl_available, "openssl isn't available")
+    @unittest.skipIf(b'secp224r1' not in _openssl_curves,
+                     "this openssl doesn't support secp224r1")
     def test_ec_explicit_unknown(self):
         """Import EC key with unknown explicit parameters"""
 
