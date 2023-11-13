@@ -1,0 +1,52 @@
+From: Stefano Rivera <stefanor@debian.org>
+Date: Wed, 18 May 2022 09:03:00 -0400
+Subject: Revert fido 0.9.2 support
+
+Not yet in Debian, we're still on 0.9.1
+
+This reverts: 7a4597953a631ee5091ac1b6e384e32d4f018a82
+---
+ asyncssh/sk.py   | 2 +-
+ setup.py         | 2 +-
+ tests/sk_stub.py | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/asyncssh/sk.py b/asyncssh/sk.py
+index 969bff9..56510b0 100644
+--- a/asyncssh/sk.py
++++ b/asyncssh/sk.py
+@@ -167,7 +167,7 @@ def sk_enroll(alg: int, application: bytes, user: str,
+     try:
+         return _ctap2_enroll(dev, alg, application, user, pin, resident)
+     except CtapError as exc:
+-        if exc.code == CtapError.ERR.PUAT_REQUIRED:
++        if exc.code == CtapError.ERR.PIN_REQUIRED:
+             raise ValueError('PIN required') from None
+         elif exc.code == CtapError.ERR.PIN_INVALID:
+             raise ValueError('Invalid PIN') from None
+diff --git a/setup.py b/setup.py
+index b9df796..5d773bf 100755
+--- a/setup.py
++++ b/setup.py
+@@ -60,7 +60,7 @@ setup(name = 'asyncssh',
+       install_requires = ['cryptography >= 3.1', 'typing_extensions >= 3.6'],
+       extras_require = {
+           'bcrypt':     ['bcrypt >= 3.1.3'],
+-          'fido2':      ['fido2 >= 0.9.2'],
++          'fido2':      ['fido2 == 0.9.1'],
+           'gssapi':     ['gssapi >= 1.2.0'],
+           'libnacl':    ['libnacl >= 1.4.2'],
+           'pkcs11':     ['python-pkcs11 >= 0.7.0'],
+diff --git a/tests/sk_stub.py b/tests/sk_stub.py
+index ffba14c..aeb6b88 100644
+--- a/tests/sk_stub.py
++++ b/tests/sk_stub.py
+@@ -195,7 +195,7 @@ class Ctap2(_CtapStub):
+         if self.dev.error == 'err':
+             raise CtapError(CtapError.ERR.INVALID_CREDENTIAL)
+         elif self.dev.error == 'pinreq':
+-            raise CtapError(CtapError.ERR.PUAT_REQUIRED)
++            raise CtapError(CtapError.ERR.PIN_REQUIRED)
+         elif self.dev.error == 'badpin':
+             raise CtapError(CtapError.ERR.PIN_INVALID)
+ 

@@ -1,4 +1,4 @@
-# Copyright (c) 2013-2018 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2013-2021 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -26,7 +26,8 @@ _curve_param_map = {}
 # pylint: disable=invalid-name
 
 
-def register_prime_curve(curve_id, p, a, b, point, n):
+def register_prime_curve(curve_id: bytes, p: int, a: int, b: int,
+                         point: bytes, n: int) -> None:
     """Register an elliptic curve prime domain
 
        This function registers an elliptic curve prime domain by
@@ -40,7 +41,8 @@ def register_prime_curve(curve_id, p, a, b, point, n):
     _curve_param_map[p, a % p, b % p, point, n] = curve_id
 
 
-def lookup_ec_curve_by_params(p, a, b, point, n):
+def lookup_ec_curve_by_params(p: int, a: int, b: int,
+                              point: bytes, n: int) -> bytes:
     """Look up an elliptic curve by its parameters
 
        This function looks up an elliptic curve by its parameters
@@ -51,7 +53,7 @@ def lookup_ec_curve_by_params(p, a, b, point, n):
     try:
         return _curve_param_map[p, a % p, b % p, point, n]
     except (KeyError, ValueError):
-        raise ValueError('Unknown elliptic curve parameters')
+        raise ValueError('Unknown elliptic curve parameters') from None
 
 
 # pylint: disable=line-too-long

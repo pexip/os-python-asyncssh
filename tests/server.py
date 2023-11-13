@@ -1,4 +1,4 @@
-# Copyright (c) 2016-2020 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2016-2021 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -30,7 +30,7 @@ import subprocess
 import asyncssh
 from asyncssh.misc import async_context_manager
 
-from .util import AsyncTestCase, run, x509_available
+from .util import AsyncTestCase, all_tasks, current_task, run, x509_available
 
 
 class Server(asyncssh.SSHServer):
@@ -284,8 +284,10 @@ class ServerTestCase(AsyncTestCase):
     async def asyncTearDownClass(cls):
         """Shut down test server and agent"""
 
-        # Wait a bit for existing tasks to exit
-        await asyncio.sleep(1)
+        tasks = all_tasks()
+        tasks.remove(current_task())
+
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         cls._server.close()
         await cls._server.wait_closed()
@@ -301,22 +303,23 @@ class ServerTestCase(AsyncTestCase):
         return bool(self._agent_pid)
 
     @async_context_manager
-    async def connect(self, options=None, **kwargs):
+    async def connect(self, host=(), port=(), gss_host=None,
+                      options=None, **kwargs):
         """Open a connection to the test server"""
 
-        options = asyncssh.SSHClientConnectionOptions(options, gss_host=None)
-
-        return await asyncssh.connect(self._server_addr, self._server_port,
-                                      options=options, **kwargs)
+        return await asyncssh.connect(host or self._server_addr,
+                                      port or self._server_port,
+                                      gss_host=gss_host, options=options,
+                                      **kwargs)
 
     @async_context_manager
-    async def connect_reverse(self, options=None, **kwargs):
+    async def connect_reverse(self, options=None, gss_host=None, **kwargs):
         """Create a connection to the test server"""
 
         options = asyncssh.SSHServerConnectionOptions(options,
                                                       server_factory=Server,
                                                       server_host_keys=['skey'],
-                                                      gss_host=None)
+                                                      gss_host=gss_host)
 
         return await asyncssh.connect_reverse(self._server_addr,
                                               self._server_port,

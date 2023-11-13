@@ -1,4 +1,4 @@
-# Copyright (c) 2016-2020 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2016-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -62,6 +62,11 @@ class _ClientChannel(asyncssh.SSHClientChannel):
                 args = args[:5] + (String(args[5][4:-6]),)
 
         super()._send_request(request, *args, want_reply=want_reply)
+
+    def get_send_pktsize(self):
+        """Return the sender's max packet size """
+
+        return self._send_pktsize
 
     def send_request(self, request, *args):
         """Send a custom request (for unit testing)"""
@@ -151,6 +156,11 @@ class _ServerChannel(asyncssh.SSHServerChannel):
 
         asyncio.get_event_loop().call_later(0.1, self._report_response, True)
 
+    def get_send_pktsize(self):
+        """Return the sender's max packet size """
+
+        return self._send_pktsize
+
     async def open_session(self):
         """Attempt to open a session on the client"""
 
@@ -158,11 +168,10 @@ class _ServerChannel(asyncssh.SSHServerChannel):
 
 
 class _EchoServerSession(asyncssh.SSHServerSession):
-    """A shell session which echos data from stdin to stdout/stderr"""
+    """A shell session which echoes data from stdin to stdout/stderr"""
 
     def __init__(self):
         self._chan = None
-        self._pty_ok = True
 
     def connection_made(self, chan):
         """Handle session open"""
@@ -173,15 +182,8 @@ class _EchoServerSession(asyncssh.SSHServerSession):
 
         if username == 'close':
             self._chan.close()
-        elif username == 'no_pty':
-            self._pty_ok = False
         elif username == 'task_error':
             raise RuntimeError('Exception handler test')
-
-    def pty_requested(self, term_type, term_size, term_modes):
-        """Handle pseudo-terminal request"""
-
-        return self._pty_ok
 
     def shell_requested(self):
         """Handle shell request"""
@@ -201,6 +203,47 @@ class _EchoServerSession(asyncssh.SSHServerSession):
 
         self._chan.write_eof()
         self._chan.close()
+
+
+class _PTYServerSession(asyncssh.SSHServerSession):
+    """Server for testing PTY requests"""
+
+    def __init__(self):
+        self._chan = None
+        self._pty_ok = True
+
+    def connection_made(self, chan):
+        """Handle session open"""
+
+        self._chan = chan
+
+        username = self._chan.get_extra_info('username')
+
+        if username == 'no_pty':
+            self._pty_ok = False
+
+    def pty_requested(self, term_type, term_size, term_modes):
+        """Handle pseudo-terminal request"""
+
+        self._chan.set_extra_info(
+            pty_args=(term_type, term_size,
+                      term_modes.get(asyncssh.PTY_OP_OSPEED)))
+
+        return self._pty_ok
+
+    def shell_requested(self):
+        """Handle shell request"""
+
+        return True
+
+    def session_started(self):
+        """Handle session start"""
+
+        chan = self._chan
+
+
+        chan.write(f'Req: {chan.get_extra_info("pty_args")}\n')
+        chan.close()
 
 
 class _ChannelServer(Server):
@@ -250,8 +293,9 @@ class _ChannelServer(Server):
             except asyncssh.ChannelOpenError:
                 stdout.channel.exit(1)
         elif action == 'rejected_session':
-            chan = _ServerChannel(self._conn, asyncio.get_event_loop(), False,
-                                  False, 0, 1024, None, 'strict', 1, 32768)
+            chan = _ServerChannel(self._conn, asyncio.get_event_loop(),
+                                  False, False, False, 0, 1024, None,
+                                  'strict', 1, 32768)
 
             try:
                 await chan.open_session()
@@ -393,6 +437,9 @@ class _ChannelServer(Server):
                                    String('ssh-connection'), String('none'))
         elif action == 'invalid_response':
             stdin.channel.send_packet(MSG_CHANNEL_SUCCESS)
+        elif action == 'send_pktsize':
+            stdout.write(str(stdout.channel.get_send_pktsize()))
+            stdout.close()
         else:
             stdin.channel.exit(255)
 
@@ -411,7 +458,8 @@ class _ChannelServer(Server):
 
         return username not in {'guest', 'conn_close_startup',
                                 'conn_close_open', 'close', 'echo',
-                                'no_channels', 'no_pty', 'task_error'}
+                                'no_channels', 'no_pty', 'request_pty',
+                                'task_error'}
 
     def session_requested(self):
         """Handle a request to create a new session"""
@@ -426,8 +474,10 @@ class _ChannelServer(Server):
                 return False
             elif username == 'conn_close_open':
                 return (channel, self._conn_close())
-            elif username in {'close', 'echo', 'no_pty', 'task_error'}:
+            elif username in {'close', 'echo', 'task_error'}:
                 return (channel, _EchoServerSession())
+            elif username in {'request_pty', 'no_pty'}:
+                return (channel, _PTYServerSession())
             elif username != 'no_channels':
                 return (channel, self._begin_session)
             else:
@@ -456,12 +506,11 @@ class _TestChannel(ServerTestCase):
 
             self.assertEqual(session.exit_status, expected_result)
 
-    async def _check_session(self, conn, command=None, *, subsystem=None,
+    async def _check_session(self, conn, command=(), *,
                              large_block=False, **kwargs):
         """Open a session and test if an input line is echoed back"""
 
-        chan, session = await _create_session(conn, command,
-                                              subsystem=subsystem, *kwargs)
+        chan, session = await _create_session(conn, command, **kwargs)
 
         if large_block:
             data = 4 * [1025*1024*'\0']
@@ -519,7 +568,15 @@ class _TestChannel(ServerTestCase):
         """Test execution of a remote command"""
 
         async with self.connect() as conn:
-            await self._check_session(conn, 'echo')
+            await self._check_session(conn, 'echo', window=1024*1024,
+                                      max_pktsize=16384)
+
+    @asynctest
+    async def test_exec_from_connect(self):
+        """Test execution of a remote command set on connection"""
+
+        async with self.connect(command='echo') as conn:
+            await self._check_session(conn)
 
     @asynctest
     async def test_forced_exec(self):
@@ -648,7 +705,7 @@ class _TestChannel(ServerTestCase):
                 chan, _ = await _create_session(conn)
 
                 result = await chan.make_request(b'keepalive@openssh.com')
-                self.assertTrue(result)
+                self.assertFalse(result)
 
     @asynctest
     async def test_invalid_open_confirmation(self):
@@ -913,21 +970,20 @@ class _TestChannel(ServerTestCase):
             self.assertEqual(session.exit_status, 1)
 
     @asynctest
-    async def test_terminal_info(self):
-        """Test sending terminal information"""
+    async def test_request_pty(self):
+        """Test reuquesting a PTY with terminal information"""
 
         modes = {asyncssh.PTY_OP_OSPEED: 9600}
 
-        async with self.connect() as conn:
-            chan, session = await _create_session(conn, 'term',
-                                                  term_type='ansi',
+        async with self.connect(username='request_pty') as conn:
+            chan, session = await _create_session(conn, term_type='ansi',
                                                   term_size=(80, 24),
                                                   term_modes=modes)
 
             await chan.wait_closed()
 
             result = ''.join(session.recv_buf[None])
-            self.assertEqual(result, "('ansi', (80, 24, 0, 0), 9600)\r\n")
+            self.assertEqual(result, "Req: ('ansi', (80, 24, 0, 0), 9600)\r\n")
 
     @asynctest
     async def test_terminal_full_size(self):
@@ -999,7 +1055,7 @@ class _TestChannel(ServerTestCase):
 
         async with self.connect(username='no_pty') as conn:
             with self.assertRaises(asyncssh.ChannelOpenError):
-                await _create_session(conn, 'term', term_type='ansi')
+                await _create_session(conn, term_type='ansi')
 
     @asynctest
     async def test_invalid_term_type(self):
@@ -1053,6 +1109,18 @@ class _TestChannel(ServerTestCase):
             self.assertEqual(result, 'test\n')
 
     @asynctest
+    async def test_env_from_connect(self):
+        """Test setting environment on connection"""
+
+        async with self.connect(env={'TEST': 'test'}) as conn:
+            chan, session = await _create_session(conn, 'env')
+
+            await chan.wait_closed()
+
+            result = ''.join(session.recv_buf[None])
+            self.assertEqual(result, 'test\n')
+
+    @asynctest
     async def test_env_list(self):
         """Test setting environment using a list of name=value strings"""
 
@@ -1089,6 +1157,23 @@ class _TestChannel(ServerTestCase):
 
             result = ''.join(session.recv_buf[None])
             self.assertEqual(result, 'test\n')
+
+    @asynctest
+    async def test_send_env_from_connect(self):
+        """Test sending local environment on connection"""
+
+        try:
+            os.environ['TEST'] = 'test'
+
+            async with self.connect(send_env=['TEST']) as conn:
+                chan, session = await _create_session(conn, 'env')
+
+                await chan.wait_closed()
+
+                result = ''.join(session.recv_buf[None])
+                self.assertEqual(result, 'test\n')
+        finally:
+            del os.environ['TEST']
 
     @asynctest
     async def test_mixed_env(self):
@@ -1527,6 +1612,14 @@ class _TestChannelNoPTY(ServerTestCase):
                 await conn.run('echo', request_pty='force')
 
     @asynctest
+    async def test_exec_pty_from_connect(self):
+        """Test execution of a command that requests a PTY on the connection"""
+
+        async with self.connect(request_pty='force') as conn:
+            with self.assertRaises(asyncssh.ChannelOpenError):
+                await conn.run('echo')
+
+    @asynctest
     async def test_exec_no_pty(self):
         """Test execution of a remote command that doesn't request a PTY"""
 
@@ -1554,3 +1647,53 @@ class _TestChannelNoAgentForwarding(ServerTestCase):
             result = await conn.run('agent')
 
         self.assertEqual(result.exit_status, 1)
+
+
+class _TestConnectionDropbearClient(ServerTestCase):
+    """Unit tests for testing Dropbear client compatibility fix"""
+
+    @classmethod
+    async def start_server(cls):
+        """Start an SSH server to connect to"""
+
+        return await cls.create_server(_ChannelServer)
+
+    @asynctest
+    async def test_dropbear_client(self):
+        """Test reduced dropbear send packet size"""
+
+        with patch('asyncssh.connection.SSHServerChannel', _ServerChannel):
+            async with self.connect(client_version='dropbear',
+                                    max_pktsize=32759) as conn:
+                _, stdout, _ = await conn.open_session('send_pktsize')
+                self.assertEqual((await stdout.read()), '32758')
+
+            async with self.connect(client_version='dropbear',
+                                    max_pktsize=32759,
+                                    compression_algs=None) as conn:
+                _, stdout, _ = await conn.open_session('send_pktsize')
+                self.assertEqual((await stdout.read()), '32759')
+
+
+class _TestConnectionDropbearServer(ServerTestCase):
+    """Unit tests for testing Dropbear server compatibility fix"""
+
+    @classmethod
+    async def start_server(cls):
+        """Start an SSH server to connect to"""
+
+        return await cls.create_server(
+            _ChannelServer, server_version='dropbear', max_pktsize=32759)
+
+    @asynctest
+    async def test_dropbear_server(self):
+        """Test reduced dropbear send packet size"""
+
+        with patch('asyncssh.connection.SSHClientChannel', _ClientChannel):
+            async with self.connect() as conn:
+                stdin, _, _ = await conn.open_session()
+                self.assertEqual(stdin.channel.get_send_pktsize(), 32758)
+
+            async with self.connect(compression_algs=None) as conn:
+                stdin, _, _ = await conn.open_session()
+                self.assertEqual(stdin.channel.get_send_pktsize(), 32759)

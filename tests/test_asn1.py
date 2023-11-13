@@ -1,4 +1,4 @@
-# Copyright (c) 2015-2018 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2015-2021 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -30,8 +30,6 @@ from asyncssh.asn1 import RawDERObject, TaggedDERObject, PRIVATE
 
 class _TestASN1(unittest.TestCase):
     """Unit tests for ASN.1 module"""
-
-    # pylint: disable=bad-whitespace
 
     tests = [
         (None,                                '0500'),
@@ -167,8 +165,6 @@ class _TestASN1(unittest.TestCase):
         '06020080',                           # Invalid component
         '06020081'                            # Incomplete component
     ]
-
-    # pylint: enable=bad-whitespace
 
     def test_asn1(self):
         """Unit test ASN.1 module"""

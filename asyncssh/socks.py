@@ -1,4 +1,4 @@
-# Copyright (c) 2018 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2018-2021 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -21,10 +21,18 @@
 """SOCKS forwarding support"""
 
 from ipaddress import ip_address
+from typing import TYPE_CHECKING, Callable, Optional
 
-from .forward import SSHLocalForwarder
+from .forward import SSHForwarderCoro, SSHLocalForwarder
 
-# pylint: disable=bad-whitespace
+
+if TYPE_CHECKING:
+    # pylint: disable=cyclic-import
+    from .connection import SSHConnection
+
+
+_RecvHandler = Optional[Callable[[bytes], None]]
+
 
 SOCKS4                  = 0x04
 SOCKS5                  = 0x05
@@ -41,45 +49,53 @@ SOCKS5_ADDR_HOSTNAME    = 0x03
 SOCKS5_ADDR_IPV6        = 0x04
 
 SOCKS4_OK_RESPONSE      = bytes((0, SOCKS4_OK, 0, 0, 0, 0, 0, 0))
-SOCKS5_OK_RESPONSE      = bytes((SOCKS5, SOCKS5_OK, 0,
-                                 SOCKS5_ADDR_HOSTNAME, 0, 0, 0))
+SOCKS5_OK_RESPONSE_HDR  = bytes((SOCKS5, SOCKS5_OK, 0))
 
 _socks5_addr_len = { SOCKS5_ADDR_IPV4: 4, SOCKS5_ADDR_IPV6: 16 }
-
-# pylint: enable=bad-whitespace
 
 
 class SSHSOCKSForwarder(SSHLocalForwarder):
     """SOCKS dynamic port forwarding connection handler"""
 
-    def __init__(self, conn, coro):
+    def __init__(self, conn: 'SSHConnection', coro: SSHForwarderCoro):
         super().__init__(conn, coro)
 
         self._inpbuf = b''
         self._bytes_needed = 2
-        self._recv_handler = self._recv_version
+        self._recv_handler: _RecvHandler = self._recv_version
+        self._addrtype = 0
         self._host = ''
         self._port = 0
 
-    def _connect(self):
+    def _connect(self) -> None:
         """Send request to open a new tunnel connection"""
+
+        assert self._transport is not None
 
         self._recv_handler = None
 
         orig_host, orig_port = self._transport.get_extra_info('peername')[:2]
         self.forward(self._host, self._port, orig_host, orig_port)
 
-    def _send_socks4_ok(self):
+    def _send_socks4_ok(self) -> None:
         """Send SOCKS4 success response"""
+
+        assert self._transport is not None
 
         self._transport.write(SOCKS4_OK_RESPONSE)
 
-    def _send_socks5_ok(self):
+    def _send_socks5_ok(self) -> None:
         """Send SOCKS5 success response"""
 
-        self._transport.write(SOCKS5_OK_RESPONSE)
+        assert self._transport is not None
 
-    def _recv_version(self, data):
+        addrlen = _socks5_addr_len[self._addrtype] + 2
+
+        self._transport.write(SOCKS5_OK_RESPONSE_HDR +
+                              bytes((self._addrtype,)) +
+                              addrlen * b'\0')
+
+    def _recv_version(self, data: bytes) -> None:
         """Parse SOCKS version"""
 
         if data[0] == SOCKS4:
@@ -94,7 +110,7 @@ class SSHSOCKSForwarder(SSHLocalForwarder):
         else:
             self.close()
 
-    def _recv_socks4_addr(self, data):
+    def _recv_socks4_addr(self, data: bytes) -> None:
         """Parse SOCKSv4 address and port"""
 
         self._port = (data[0] << 8) + data[1]
@@ -106,7 +122,7 @@ class SSHSOCKSForwarder(SSHLocalForwarder):
         self._bytes_needed = -1
         self._recv_handler = self._recv_socks4_user
 
-    def _recv_socks4_user(self, data):
+    def _recv_socks4_user(self, data: bytes) -> None:
         """Parse SOCKSv4 username"""
 
         # pylint: disable=unused-argument
@@ -118,7 +134,7 @@ class SSHSOCKSForwarder(SSHLocalForwarder):
             self._bytes_needed = -1
             self._recv_handler = self._recv_socks4_hostname
 
-    def _recv_socks4_hostname(self, data):
+    def _recv_socks4_hostname(self, data: bytes) -> None:
         """Parse SOCKSv4 hostname"""
 
         try:
@@ -130,8 +146,10 @@ class SSHSOCKSForwarder(SSHLocalForwarder):
         self._send_socks4_ok()
         self._connect()
 
-    def _recv_socks5_authlist(self, data):
+    def _recv_socks5_authlist(self, data: bytes) -> None:
         """Parse SOCKSv5 list of authentication methods"""
+
+        assert self._transport is not None
 
         if SOCKS5_AUTH_NONE in data:
             self._transport.write(bytes((SOCKS5, SOCKS5_AUTH_NONE)))
@@ -141,25 +159,27 @@ class SSHSOCKSForwarder(SSHLocalForwarder):
         else:
             self.close()
 
-    def _recv_socks5_command(self, data):
+    def _recv_socks5_command(self, data: bytes) -> None:
         """Parse SOCKSv5 command"""
 
         if data[0] == SOCKS5 and data[1] == SOCKS_CONNECT and data[2] == 0:
             if data[3] == SOCKS5_ADDR_HOSTNAME:
                 self._bytes_needed = 1
                 self._recv_handler = self._recv_socks5_hostlen
+                self._addrtype = SOCKS5_ADDR_IPV4
             else:
                 addrlen = _socks5_addr_len.get(data[3])
 
                 if addrlen:
                     self._bytes_needed = addrlen
                     self._recv_handler = self._recv_socks5_addr
+                    self._addrtype = data[3]
                 else:
                     self.close()
         else:
             self.close()
 
-    def _recv_socks5_addr(self, data):
+    def _recv_socks5_addr(self, data: bytes) -> None:
         """Parse SOCKSv5 address"""
 
         self._host = str(ip_address(data))
@@ -167,13 +187,13 @@ class SSHSOCKSForwarder(SSHLocalForwarder):
         self._bytes_needed = 2
         self._recv_handler = self._recv_socks5_port
 
-    def _recv_socks5_hostlen(self, data):
+    def _recv_socks5_hostlen(self, data: bytes) -> None:
         """Parse SOCKSv5 host length"""
 
         self._bytes_needed = data[0]
         self._recv_handler = self._recv_socks5_host
 
-    def _recv_socks5_host(self, data):
+    def _recv_socks5_host(self, data: bytes) -> None:
         """Parse SOCKSv5 host"""
 
         try:
@@ -185,14 +205,14 @@ class SSHSOCKSForwarder(SSHLocalForwarder):
         self._bytes_needed = 2
         self._recv_handler = self._recv_socks5_port
 
-    def _recv_socks5_port(self, data):
+    def _recv_socks5_port(self, data: bytes) -> None:
         """Parse SOCKSv5 port"""
 
         self._port = (data[0] << 8) + data[1]
         self._send_socks5_ok()
         self._connect()
 
-    def data_received(self, data, datatype=None):
+    def data_received(self, data: bytes, datatype: int = None) -> None:
         """Handle incoming data from the SOCKS client"""
 
         if self._recv_handler:

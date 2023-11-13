@@ -59,6 +59,18 @@ from asyncssh.misc import ConnectionLost, SignalReceived
 from asyncssh.packet import Byte, String, UInt32, UInt64
 
 
+# pylint: disable=no-member
+
+if hasattr(asyncio, 'all_tasks'):
+    all_tasks = asyncio.all_tasks
+    current_task = asyncio.current_task
+else:
+    all_tasks = asyncio.Task.all_tasks
+    current_task = asyncio.Task.current_task
+
+# pylint: enable=no-member
+
+
 def asynctest(coro):
     """Decorator for async tests, for use with AsyncTestCase"""
 
@@ -130,7 +142,7 @@ async def echo(stdin, stdout, stderr=None):
         stdout.write_eof()
     except SignalReceived as exc:
         if exc.signal == 'ABRT':
-            raise ConnectionLost('Abort')
+            raise ConnectionLost('Abort') from None
         else:
             stdin.channel.exit_with_signal(exc.signal)
     except OSError:
@@ -180,7 +192,8 @@ def run(cmd):
         return subprocess.check_output(cmd, shell=True,
                                        stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError as exc: # pragma: no cover
-        print(exc.output.decode())
+        logger.error('Error running command: %s' % cmd)
+        logger.error(exc.output.decode())
         raise
 
 

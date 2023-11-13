@@ -1,3 +1,40 @@
+python-asyncssh (2.10.1-2) unstable; urgency=medium
+
+  * Team Upload.
+  * Cherry-pick upstream patch to fix FTBFS with
+    python3.11 (Closes: #1026586)
+  * export HOME in d/rules to set it accordingly in tests
+
+ -- Nilesh Patra <nilesh@debian.org>  Thu, 22 Dec 2022 09:24:16 +0530
+
+python-asyncssh (2.10.1-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+    - Fixes FTBFS with OpenSSL 3 (Closes: #1006560)
+    - Fixes expired root test failure (Closes: #976107)
+  * Switch watch file to follow tags, instead of releases.
+  * Bump copyright years.
+  * Refresh patches.
+  * Build-Depend on python3-typing-extensions.
+  * Patch: revert python3-fido2 0.9.2 support, we're not there yet.
+  * Patch: Successfully run the test suite, firewalled.
+
+ -- Stefano Rivera <stefanor@debian.org>  Wed, 18 May 2022 12:00:16 -0400
+
+python-asyncssh (2.5.0-1) unstable; urgency=medium
+
+  [ Ondřej Nový ]
+  * d/control: Update Maintainer field with new Debian Python Team
+    contact address.
+  * d/control: Update Vcs-* fields with new Debian Python Team Salsa
+    layout.
+
+  [ Vincent Bernat ]
+  * Acknowledge changes from previous NMUs.
+
+ -- Vincent Bernat <bernat@debian.org>  Mon, 05 Apr 2021 08:37:49 +0200
+
 python-asyncssh (2.5.0-0.1pexip1) pexip; urgency=medium
 
   * Prepare Pexip packaging

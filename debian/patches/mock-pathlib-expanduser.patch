@@ -1,0 +1,30 @@
+From 2ff28a51439ec687be687f9b3d204316e60cabcd Mon Sep 17 00:00:00 2001
+From: Georg Sauthoff <mail@gms.tf>
+Date: Sat, 9 Jul 2022 17:22:55 +0200
+Subject: [PATCH] Also patch pathlib expanduser
+
+NB: with recent Python versions the existing `os.path.expanduser()` patch
+also affects `pathlib.path.expanduser()` which is invoked by the config
+parser for expanding `~/.ssh`.
+---
+ tests/test_config.py | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/tests/test_config.py b/tests/test_config.py
+index 31f055ec..ce3083e3 100644
+--- a/tests/test_config.py
++++ b/tests/test_config.py
+@@ -417,8 +417,12 @@ def mock_expanduser(path):
+ 
+             return path
+ 
++        def mock_pathlib_expanduser(s):
++            return s._from_parts([os.environ['HOME']] + s._parts[1:])
++
+         with self.assertRaises(asyncssh.ConfigParseError):
+-            with patch('os.path.expanduser', mock_expanduser):
++            with patch('os.path.expanduser', mock_expanduser), \
++                    patch('pathlib.Path.expanduser', mock_pathlib_expanduser):
+                 self._parse_config('RemoteCommand %d')
+ 
+     def test_uid_percent_expansion_unavailable(self):
