@@ -1,3 +1,17 @@
+python-asyncssh (2.10.1-2+pexip24u5+deb12u1) pexip; urgency=medium
+
+  * New upstream release - sync up
+
+ -- Steve McIntyre <steve.mcintyre@pexip.com>  Mon, 02 Sep 2024 17:21:18 +0100
+
+python-asyncssh (2.10.1-2+deb12u1) bookworm-security; urgency=medium
+
+  * Apply and tweak upstream security fix for CVE-2023-48795
+    Implement "strict kex" support to harden AsyncSSH against Terrapin
+    Attack. Closes: #1059007
+
+ -- Steve McIntyre <steve.mcintyre@pexip.com>  Fri, 16 Apr 2024 16:14:32 +0200
+
 python-asyncssh (2.10.1-2+pexip24u4) pexip; urgency=medium
 
   * Apply and tweak upstream security fix for CVE-2023-48795
