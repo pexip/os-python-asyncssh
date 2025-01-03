@@ -4,3 +4,4 @@ sphinx-use-default-theme.patch
 0004-Handle-ConnectionRefusedError-when-connecting-to-223.patch
 mock-pathlib-expanduser.patch
 CVE-2023-48795.patch
+CVE-2023-46445-and-CVE-2023-46446.patch
